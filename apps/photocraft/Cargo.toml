@@ -90,6 +90,9 @@ winit = { version = "=0.30.13", default-features = false, features = ["x11"] }
 # Safe Windows screen-capture bindings; Linux uses the pure-Rust X11 client/portal.
 xcap = "=0.9.8"
 winsafe = { version = "=0.0.29", default-features = false, features = ["user"] }
+# The pen's barrel button (`tablet.rs`): winit's message hook (`EventLoopBuilderExtWindows`),
+# which eframe doesn't re-export. Already in Cargo.lock (eframe); pinned exactly.
+winit = { version = "=0.30.13", default-features = false }
 
 # tests/mac_menu_appkit.rs: reads AppKit's menu bar back and sends it real key events.
 [target.'cfg(target_os = "macos")'.dev-dependencies]

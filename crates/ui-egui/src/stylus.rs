@@ -74,6 +74,13 @@ struct FeedState {
     latest: Option<PenSample>,
     /// Every sample set since the canvas last drained them, oldest first.
     queue: VecDeque<PenSample>,
+    /// The pen's barrel (side) button is held (Windows, where winit drops it).
+    barrel: bool,
+    /// The barrel button was clicked (pressed and released quickly), not yet handled.
+    click: bool,
+    /// The barrel button went down since the canvas last looked: a quick click can press and
+    /// release it before the frame that handles the pen's press.
+    barrel_latch: bool,
 }
 
 /// Shared state a platform backend writes pen samples into. Cloning shares it. Each sample both
@@ -103,6 +110,30 @@ impl StylusFeed {
     /// The samples set since the last drain, oldest first.
     pub fn drain(&self) -> Vec<PenSample> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).queue.drain(..).collect()
+    }
+
+    /// The pen's barrel button: held, and whether it was just clicked.
+    pub fn set_barrel(&self, held: bool, click: bool) {
+        let mut g = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.barrel = held;
+        g.barrel_latch |= held;
+        g.click |= click;
+    }
+
+    /// The pen's barrel button is held: a tap with it acts as a right-click.
+    pub fn barrel(&self) -> bool {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).barrel
+    }
+
+    /// The barrel button is held, or was pressed since the last call (then forgotten).
+    pub fn take_barrel(&self) -> bool {
+        let mut g = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.barrel || std::mem::take(&mut g.barrel_latch)
+    }
+
+    /// A barrel-button click since the last call (a right-click with the pen).
+    pub fn take_click(&self) -> bool {
+        std::mem::take(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner).click)
     }
 }
 

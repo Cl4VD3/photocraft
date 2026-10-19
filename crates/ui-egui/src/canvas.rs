@@ -3686,6 +3686,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // and a click (or a long press that never moved) just ends it.
         if strokes_live(tool)
             && app.drag.is_none()
+            && app.barrel_tap.is_none()
             && response.is_pointer_button_down_on()
             && ui.input(|i| i.pointer.primary_pressed())
             && let Some(p) = ui.input(|i| i.pointer.press_origin()).filter(|p| rect.contains(*p))

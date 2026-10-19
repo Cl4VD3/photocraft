@@ -3,8 +3,9 @@
 //! winit 0.30 drops tablet data on both, so `photocraft-tablet` reads it beside winit (an AppKit
 //! local event monitor; XInput2 raw events on a second X connection) and this module writes each
 //! sample into the UI's [`StylusFeed`], where the canvas reads it exactly like the web runner's
-//! Pointer Events and automation's simulated pen. Windows needs nothing here: winit forwards
-//! `WM_POINTER` pressure as touch force.
+//! Pointer Events and automation's simulated pen. On Windows winit forwards `WM_POINTER` pressure
+//! as touch force but drops the pen's barrel button, which [`install_windows`] reads from winit's
+//! message hook so a tap or hover click with it acts as a right-click.
 //!
 //! Wayland compositors give a pen only to clients that bind the tablet protocol
 //! (`zwp_tablet_v2`), which winit 0.30 doesn't (and binding it on winit's connection needs
@@ -15,15 +16,20 @@
 
 #[cfg(any(target_os = "linux", test))]
 use crate::linux_libs::DisplaySession;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use photocraft_tablet::Sample;
-use photocraft_ui_egui::stylus::{PenSample, StylusFeed};
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+use photocraft_ui_egui::stylus::PenSample;
+use photocraft_ui_egui::stylus::StylusFeed;
 
 /// A tablet sample as the UI's pen sample.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn pen_sample(s: Sample) -> PenSample {
     PenSample { pressure: s.pressure, tilt_x: s.tilt_x, tilt_y: s.tilt_y, rotation: s.rotation, eraser: s.eraser }.sanitized()
 }
 
 /// Writes tablet samples into `feed` (`None` = a mouse).
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn sink(feed: StylusFeed) -> impl Fn(Option<Sample>) + Send + 'static {
     move |s| feed.set(s.map(pen_sample))
 }
@@ -34,6 +40,20 @@ pub fn sink(feed: StylusFeed) -> impl Fn(Option<Sample>) + Send + 'static {
 #[cfg(target_os = "macos")]
 pub fn install_macos(feed: &StylusFeed) -> Option<photocraft_tablet::macos::Monitor> {
     photocraft_tablet::macos::Monitor::install(sink(feed.clone())).map_err(|e| log::warn!("{e}")).ok()
+}
+
+/// Read the pen's barrel button from winit's message loop (before the event loop is built).
+#[cfg(target_os = "windows")]
+pub fn windows_msg_hook(builder: &mut eframe::EventLoopBuilder<eframe::UserEvent>) {
+    use winit::platform::windows::EventLoopBuilderExtWindows as _;
+    builder.with_msg_hook(photocraft_tablet::windows::msg_hook);
+}
+
+/// Send the barrel button's changes into `feed` (once the app exists).
+#[cfg(target_os = "windows")]
+pub fn install_windows(feed: &StylusFeed) {
+    let feed = feed.clone();
+    photocraft_tablet::windows::set_sink(move |b| feed.set_barrel(b.barrel, b.click));
 }
 
 /// The display server to open the window on: the session's own, except Xwayland on Wayland when

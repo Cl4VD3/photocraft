@@ -3,10 +3,11 @@ name = "photocraft-tablet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Pen tablet pressure, tilt, rotation and eraser end on macOS (AppKit) and Linux X11 (XInput2)"
+description = "Pen tablet pressure, tilt, rotation and eraser end on macOS (AppKit) and Linux X11 (XInput2), and the barrel button on Windows"
 
 # The one isolated `unsafe` helper crate (craftrules never-crash, AGENTS.md): the AppKit event
-# monitor needs Objective-C interop. Only `src/macos.rs` allows `unsafe`; everything else is
+# monitor needs Objective-C interop, and the Windows barrel-button reader one user32 call. Only
+# `src/macos.rs` and `src/windows.rs` allow `unsafe`; everything else is
 # denied, and every other crate keeps the workspace's `unsafe_code = "forbid"`.
 [lints.rust]
 unsafe_code = "deny"
@@ -22,6 +23,10 @@ objc2 = "=0.6.4"
 block2 = "=0.6.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSGeometry"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSEvent"] }
+
+# The Windows side-button reader logs what the driver reports (into the app's log file).
+[target.'cfg(target_os = "windows")'.dependencies]
+log = { workspace = true }
 
 # Pure-Rust X11 client (no unsafe in the RustConnection path we use).
 [target.'cfg(target_os = "linux")'.dependencies]

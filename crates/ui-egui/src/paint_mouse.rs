@@ -100,6 +100,10 @@ pub fn right_erases(app: &PhotocraftApp, tool: Tool) -> bool {
 /// brush with Alt held (#297), erases (Erase preference) or opens the Brush Preset picker. Arms
 /// `secondary_erase` or `brush_resize_armed` for this frame's `Down`.
 pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) -> Buttons {
+    // The pen's barrel button stands in for the right button (Windows Ink, where winit drops it).
+    if barrel_tap(app, response, tool) {
+        return Buttons::default();
+    }
     let (mods, right_down) = response.ctx.input(|i| (i.modifiers, i.pointer.secondary_down()));
     // Alt+right-drag resizes the brush (brush_resize.rs); its events reach `tool_event` like a
     // left drag's, and nothing paints. A resize whose release was missed ends here.
@@ -133,6 +137,80 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
         stopped: response.drag_stopped_by(PointerButton::Primary) || (right_drag && response.drag_stopped_by(PointerButton::Secondary)),
         clicked: response.clicked() || erase_click,
     }
+}
+
+/// Does the pen's barrel button act as the right button with `tool` here: the tools whose
+/// right-click opens the Brush Preset picker, unless the right button erases (Preferences ›
+/// Tools), which the barrel button doesn't do.
+fn barrel_opens_picker(app: &PhotocraftApp, tool: Tool) -> bool {
+    has_brush_picker(tool) && !right_erases(app, tool)
+}
+
+/// The pen's barrel button as a right-click on the canvas. With Windows Ink, winit drops the
+/// button: a click of it (Wacom's side switch set to Right Click) reaches the window as nothing
+/// at all, and a tap with it held as a left click (`photocraft_tablet::windows` reads it into the
+/// stylus feed instead). The click opens the Brush Preset picker under the pen; the tap is
+/// swallowed (nothing paints) and opens it where the pen lifts. True while such a tap is held.
+pub(crate) fn barrel_tap(app: &mut PhotocraftApp, response: &Response, tool: Tool) -> bool {
+    let ctx = &response.ctx;
+    // Where the picker opens: the pointer over the canvas, or, when the pointer is gone, where it
+    // last was over it. The pen's emulated click ends its touch contact, after which egui reports
+    // the pointer gone, often before the frame that handles the click; without this the click
+    // found no position and was dropped (it worked only when that frame came first).
+    let last_id = response.id.with("barrel-last-pointer");
+    let at = match ctx.input(|i| i.pointer.hover_pos()) {
+        Some(p) => {
+            let over = response.rect.contains(p);
+            ctx.data_mut(|d| {
+                if over {
+                    d.insert_temp(last_id, p);
+                } else {
+                    d.remove::<egui::Pos2>(last_id);
+                }
+            });
+            // Over the canvas, unless something (a panel, a popup) covers it there.
+            (over && response.hovered()).then_some(p)
+        }
+        None => ctx.data(|d| d.get_temp::<egui::Pos2>(last_id)),
+    };
+    if app.stylus.feed.take_click()
+        && barrel_opens_picker(app, tool)
+        && app.drag.is_none()
+        && let Some(p) = at
+    {
+        crate::brush_picker::open(&mut app.ui, ctx, [p.x, p.y]);
+    }
+    // The tap released last frame has been swallowed through that whole frame; it's over.
+    if app.barrel_tap == Some(BarrelTap::Released) {
+        app.barrel_tap = None;
+    }
+    let (pressed, down) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
+    // Read (and clear) the latch every frame, so a press long ago can't arm a later tap.
+    let barrel = app.stylus.feed.take_barrel();
+    if app.barrel_tap.is_none() && pressed && response.is_pointer_button_down_on() && app.drag.is_none() && barrel_opens_picker(app, tool) && barrel {
+        app.barrel_tap = Some(BarrelTap::Held);
+    }
+    if app.barrel_tap.is_none() {
+        return false;
+    }
+    // Released (possibly in the press's own frame): open the picker, and keep swallowing the
+    // pointer for the rest of this frame so the press can't start a stroke after all.
+    if !down && app.barrel_tap == Some(BarrelTap::Held) {
+        app.barrel_tap = Some(BarrelTap::Released);
+        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()).or(at) {
+            crate::brush_picker::open(&mut app.ui, ctx, [p.x, p.y]);
+        }
+    }
+    true
+}
+
+/// A tap with the pen's barrel button held (see [`barrel_tap`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BarrelTap {
+    /// The pen is down: nothing paints.
+    Held,
+    /// The pen lifted this frame and the picker opened; the frame's pointer is still swallowed.
+    Released,
 }
 
 /// `ui.pointer` with `"button": "secondary"`: true when its events should reach the tool (an
@@ -277,6 +355,67 @@ mod tests {
 
     fn strokes(h: &Harness<'static, PhotocraftApp>) -> Vec<serde_json::Value> {
         h.state().session.journal.iter().filter(|(id, _)| id == "paint.stroke").map(|(_, p)| p.clone()).collect()
+    }
+
+    /// The pen's barrel button as a right-click (Windows, where winit drops it): a tap with it
+    /// held opens the Brush Preset picker and paints nothing, also when the button and the pen's
+    /// press and release all arrive between two frames (a quick click on a Wacom side switch).
+    #[test]
+    fn barrel_tap_opens_the_picker_and_never_paints() {
+        let mut h = harness(None);
+        let c = h.state().last_canvas_rect.center();
+        h.event(egui::Event::PointerMoved(c));
+        h.run_steps(1);
+        // Held through a slow tap.
+        h.state().stylus.feed.set_barrel(true, false);
+        press(&mut h, c, PointerButton::Primary, true);
+        press(&mut h, c, PointerButton::Primary, false);
+        h.state().stylus.feed.set_barrel(false, false);
+        h.run_steps(2);
+        assert!(h.state().ui.brush_picker.is_some(), "the tap opened the picker");
+        assert!(strokes(&h).is_empty() && alpha_at(&h, c) == 0.0, "and painted nothing");
+        h.state_mut().ui.brush_picker = None;
+        h.run_steps(2);
+        // A quick click: the button is already up again, and the press and release share a frame.
+        h.state().stylus.feed.set_barrel(true, false);
+        h.state().stylus.feed.set_barrel(false, false);
+        h.event(egui::Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        assert!(h.state().ui.brush_picker.is_some(), "the quick click opened the picker");
+        assert!(strokes(&h).is_empty() && alpha_at(&h, c) == 0.0, "and painted nothing");
+        // Without the button a tap paints, and a latch from long ago doesn't swallow it.
+        h.state_mut().ui.brush_picker = None;
+        h.run_steps(2);
+        press(&mut h, c, PointerButton::Primary, true);
+        press(&mut h, c, PointerButton::Primary, false);
+        assert_eq!(strokes(&h).len(), 1, "a plain tap paints");
+        // A click of the button alone (the pen hovering, or the driver's emulated right-click,
+        // which the window never sees as a press) opens it too.
+        h.state_mut().ui.brush_picker = None;
+        h.state().stylus.feed.set_barrel(true, false);
+        h.state().stylus.feed.set_barrel(false, true);
+        h.run_steps(2);
+        assert!(h.state().ui.brush_picker.is_some(), "a click of the button opened the picker");
+        assert_eq!(strokes(&h).len(), 1, "and painted nothing more");
+        // The click's touch contact ends with egui reporting the pointer gone before the frame
+        // that handles the click: it still opens, where the pen last was over the canvas.
+        h.state_mut().ui.brush_picker = None;
+        h.run_steps(2);
+        h.event(egui::Event::PointerGone);
+        h.state().stylus.feed.set_barrel(true, false);
+        h.state().stylus.feed.set_barrel(false, true);
+        h.run_steps(2);
+        let at = h.state().ui.brush_picker;
+        assert!(at.is_some_and(|[x, y]| (x - c.x).abs() < 1.0 && (y - c.y).abs() < 1.0), "opened at the pen's last place: {at:?}");
+        // Over something else than the canvas, a click opens nothing.
+        h.state_mut().ui.brush_picker = None;
+        h.event(egui::Event::PointerMoved(egui::pos2(2.0, 2.0)));
+        h.run_steps(2);
+        h.state().stylus.feed.set_barrel(true, false);
+        h.state().stylus.feed.set_barrel(false, true);
+        h.run_steps(2);
+        assert!(h.state().ui.brush_picker.is_none(), "off the canvas, no picker");
     }
 
     #[test]

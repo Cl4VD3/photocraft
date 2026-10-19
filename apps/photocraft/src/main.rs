@@ -71,8 +71,9 @@ mod services;
 // macOS gets one instance from LaunchServices (open-documents Apple events).
 #[cfg(any(not(target_os = "macos"), test))]
 mod single_instance;
-// Windows gets pen pressure from winit (WM_POINTER); the web runner has its own listener.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+// Windows gets pen pressure from winit (WM_POINTER), and the barrel button from tablet.rs; the web
+// runner has its own listener.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
 mod tablet;
 mod ui_state;
 mod window_frame;
@@ -646,6 +647,11 @@ fn main() -> eframe::Result {
             builder.with_x11();
         }));
     }
+    // The pen's barrel button, which winit drops on Windows (tablet.rs).
+    #[cfg(target_os = "windows")]
+    {
+        options.event_loop_builder = Some(Box::new(tablet::windows_msg_hook));
+    }
     // eframe restores the saved window layout before our code runs; drop values that would crash it.
     ui_state::sanitize(options.persistence_path.as_deref());
     // Centre only the first window: eframe centres after restoring the saved position, so a
@@ -855,6 +861,8 @@ fn main() -> eframe::Result {
             }
             #[cfg(target_os = "linux")]
             tablet::spawn_x11(&app.stylus.feed, display);
+            #[cfg(target_os = "windows")]
+            tablet::install_windows(&app.stylus.feed);
             // Paths on the command line (Linux/Windows file associations, `photocraft a.psd`).
             app.open_paths(&files);
             if !unreadable_paths.is_empty() {

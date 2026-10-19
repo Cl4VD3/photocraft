@@ -644,6 +644,9 @@ pub struct PhotocraftApp {
     /// The next tool `Down` is an Alt+right-drag that resizes the brush (#297). `tool_event`
     /// takes it on every event, so a press another handler consumes can't leave it set.
     pub(crate) brush_resize_armed: bool,
+    /// This press is a tap with the pen's barrel button held: a right-click, which opens the
+    /// Brush Preset picker on release and paints nothing (`paint_mouse::barrel_tap`).
+    pub(crate) barrel_tap: Option<paint_mouse::BarrelTap>,
     /// This press began with ⌥ (Alt) held on a painting tool, so it samples colours instead of
     /// painting until it is released (`canvas::alt_eyedropper`, #417).
     pub(crate) alt_sampling: bool,
@@ -897,6 +900,7 @@ impl PhotocraftApp {
             brush_resize: None,
             quick_pick: false,
             brush_resize_armed: false,
+            barrel_tap: None,
             alt_sampling: false,
             caps_lock: false,
             opacity_keys: None,
