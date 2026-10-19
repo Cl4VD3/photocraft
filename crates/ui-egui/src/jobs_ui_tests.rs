@@ -441,28 +441,47 @@ fn saves_run_in_the_background_and_are_recorded_when_they_end() {
     assert_eq!(r["job"].as_u64(), h.state().jobs.saves.first().map(|s| s.job.0), "control clients get the job to wait on");
     assert!(h.state().saving());
 
-    // The window keeps drawing; the document stays unsaved and can't be edited meanwhile.
+    // The window keeps drawing and the document stays editable: no progress dialog takes over,
+    // only the status bar's "Saving 0%" (until the encoder reports progress, #3389).
     let (frames, _) = frames_for_at_least(&mut h, 400, 4);
     assert!(frames >= 4, "only {frames} frames while saving");
     let st = h.state().session.active().unwrap();
     assert!(st.is_dirty() && st.path.is_none());
-    assert!(h.state_mut().run("layer.new.layer", json!({})).is_err(), "the saving document is locked");
-    // The progress dialog names the save and shows its stage; the status bar reads "Saving 0%"
-    // until the encoder reports progress (#3389).
-    assert_eq!(h.query_all_by_label("Saving big.psd").count(), 1);
-    h.get_by_label("Encoding");
+    assert_eq!(h.query_all_by_label("Saving big.psd").count(), 0, "no modal progress dialog");
+    assert_eq!(h.query_all_by_label("Encoding").count(), 0);
     h.get_by_label("Saving 0%");
+    let layers = h.state().session.active().unwrap().doc.layer_count();
+    assert!(h.state_mut().run("layer.new.layer", json!({})).is_ok(), "the saving document can still be edited");
 
     gates.encode.store(true, Ordering::Relaxed);
     step_until(&mut h, |a| !a.saving());
     assert_eq!(gates.written(), ["/tmp/photocraft-test/big.psd"]);
     let st = h.state().session.active().unwrap();
-    assert!(!st.is_dirty());
+    assert_eq!(st.doc.layer_count(), layers + 1, "the edit made while saving is kept");
+    assert!(st.is_dirty(), "the file holds the state from when the save started, so the later edit is unsaved");
     assert_eq!(st.path.as_deref(), Some("/tmp/photocraft-test/big.psd"));
     assert_eq!(st.doc.name, "big.psd", "the document takes the saved file's name, as a synchronous Save As does");
     assert_eq!(h.state().ui.status, "Saved big.psd: a warning");
     assert!(noticed(h.state(), "a warning"), "the export warnings are shown");
-    assert!(h.state_mut().run("layer.new.layer", json!({})).is_ok(), "unlocked again");
+}
+
+/// Saving again while a save to the same file is still writing waits for it, then saves the
+/// newest state once (several presses meanwhile make one more save, not an error).
+#[test]
+fn saving_again_while_a_save_runs_queues_one_more_save() {
+    let mut h = app_harness();
+    let gates = Gates { write: Arc::new(AtomicBool::new(true)), ..Gates::default() };
+    h.state_mut().services.save_file = Some(gates.save(None));
+    let path = "/tmp/photocraft-test/again.psd";
+    h.state_mut().save_as(Some(path.into())).unwrap();
+    assert!(h.state_mut().run("layer.new.layer", json!({})).is_ok());
+    h.state_mut().save_as(Some(path.into())).expect("queued, not refused");
+    h.state_mut().save_as(Some(path.into())).expect("queued, not refused");
+    assert_eq!(h.state().jobs.saves.len(), 1, "one writer per file at a time");
+    gates.encode.store(true, Ordering::Relaxed);
+    step_until(&mut h, |a| !a.saving() && a.jobs.queued_saves.is_empty());
+    assert_eq!(gates.written(), [path, path], "the running save, then one save of the newest state");
+    assert!(!h.state().session.active().unwrap().is_dirty(), "the edit made during the first save is saved too");
 }
 
 #[test]
