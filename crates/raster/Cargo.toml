@@ -11,6 +11,8 @@ workspace = true
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }
 serde = { workspace = true }
+# Image › Image Rotation builds the turned surface's tiles in parallel (`orient.rs`).
+rayon = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
