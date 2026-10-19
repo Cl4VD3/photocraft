@@ -4107,23 +4107,26 @@ fn triangle_point(tri: [egui::Pos2; 3], s: f32, v: f32) -> egui::Pos2 {
 }
 
 /// A hue ring around a saturation/brightness square or HSV triangle, `size` points. A press on the
-/// ring drags the hue, inside it the saturation and brightness. Returns whether `hsva` changed.
+/// ring drags the hue, inside it the saturation and brightness; a press outside the ring (the
+/// rectangle's corners and margins) does nothing. Returns whether `hsva` changed.
 fn color_wheel(ui: &mut egui::Ui, hsva: &mut egui::ecolor::Hsva, mode: crate::state::ColorWheel, size: egui::Vec2, t: &Tokens) -> bool {
     use crate::state::ColorWheel;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let g = WheelGeom::new(rect);
-    // Which part the press started on, kept for the whole drag: the ring (hue) or the inner shape.
+    // Which part the press started on, kept for the whole drag: the ring (hue), the inner shape,
+    // or neither (`None`: outside the ring).
     let part_id = ui.id().with("color-wheel-part");
-    if ((resp.is_pointer_button_down_on() && ui.data(|d| d.get_temp::<bool>(part_id)).is_none()) || resp.clicked())
+    if ((resp.is_pointer_button_down_on() && ui.data(|d| d.get_temp::<Option<bool>>(part_id)).is_none()) || resp.clicked())
         && let Some(at) = resp.interact_pointer_pos()
     {
-        let on_ring = (at - g.c).length() >= g.inner - 1.0;
-        ui.data_mut(|d| d.insert_temp(part_id, on_ring));
+        let d = (at - g.c).length();
+        let part = (d <= g.outer + 1.0).then_some(d >= g.inner - 1.0);
+        ui.data_mut(|d| d.insert_temp(part_id, part));
     }
     let mut changed = false;
     if (resp.dragged() || resp.clicked())
         && let Some(at) = resp.interact_pointer_pos()
-        && let Some(on_ring) = ui.data(|d| d.get_temp::<bool>(part_id))
+        && let Some(Some(on_ring)) = ui.data(|d| d.get_temp::<Option<bool>>(part_id))
     {
         if on_ring {
             hsva.h = g.hue(at);
@@ -4141,7 +4144,7 @@ fn color_wheel(ui: &mut egui::Ui, hsva: &mut egui::ecolor::Hsva, mode: crate::st
         changed = true;
     }
     if !resp.is_pointer_button_down_on() {
-        ui.data_mut(|d| d.remove::<bool>(part_id));
+        ui.data_mut(|d| d.remove::<Option<bool>>(part_id));
     }
     let p = ui.painter();
     // The hue ring.
@@ -4992,11 +4995,15 @@ mod color_tests {
     }
 
     /// The wheel's rectangle in a 300 pt [`field_harness`]: right of the 38 pt chips and the gap.
-    fn wheel_geom(h: &egui_kittest::Harness<'_, PhotocraftApp>) -> WheelGeom {
+    fn wheel_rect(h: &egui_kittest::Harness<'_, PhotocraftApp>) -> Rect {
         let w = h.ctx.content_rect().width() - 16.0;
         let aw = w - 38.0 - 8.0;
         let size = vec2(aw, color_field_height(None, w).max(aw.min(220.0)));
-        WheelGeom::new(Rect::from_min_size(pos2(8.0 + 38.0 + 8.0, 8.0), size))
+        Rect::from_min_size(pos2(8.0 + 38.0 + 8.0, 8.0), size)
+    }
+
+    fn wheel_geom(h: &egui_kittest::Harness<'_, PhotocraftApp>) -> WheelGeom {
+        WheelGeom::new(wheel_rect(h))
     }
 
     /// The colour wheels: the ring picks the hue, the square or triangle inside it the saturation
@@ -5022,6 +5029,32 @@ mod color_tests {
         let hsv = srgb_hsva(h.state().session.tools.foreground);
         assert!((hsv.s - 0.25).abs() < 0.03 && (hsv.v - 0.25).abs() < 0.03, "{hsv:?}");
         assert!((hsv.h - 1.0 / 3.0).abs() < 0.02, "the hue stays");
+        // A press outside the ring (the rectangle's corner, and its side margin) changes nothing.
+        let before = h.state().session.tools.foreground;
+        let rect = wheel_rect(&h);
+        click(&mut h, rect.left_top() + vec2(2.0, 2.0));
+        click(&mut h, rect.right_bottom() - vec2(2.0, 2.0));
+        if rect.width() > 2.0 * g.outer + 12.0 {
+            click(&mut h, pos2(g.c.x - g.outer - 5.0, g.c.y));
+        }
+        assert_eq!(h.state().session.tools.foreground, before, "outside the wheel");
+        // A drag that starts on the ring keeps setting the hue outside it.
+        let start = g.at(0.0, (g.inner + g.outer) / 2.0);
+        let end = rect.left_top() + vec2(2.0, 2.0);
+        h.hover_at(start);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+        for k in 1..=4 {
+            h.hover_at(start + (end - start) * (k as f32 / 4.0));
+            h.run_steps(1);
+        }
+        h.event(egui::Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+        let hsv = srgb_hsva(h.state().session.tools.foreground);
+        assert!((hsv.h - g.hue(end)).abs() < 0.02, "the drag followed the hue to {} (got {})", g.hue(end), hsv.h);
+        // Back to green for the triangle.
+        click(&mut h, g.at(1.0 / 3.0, (g.inner + g.outer) / 2.0));
         // The triangle: its corners are the pure hue, white and black.
         h.get_by_label("Color wheel with a triangle").click();
         h.run_steps(2);
