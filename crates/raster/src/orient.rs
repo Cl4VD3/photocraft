@@ -22,9 +22,17 @@ pub enum Orient {
     Ccw90,
 }
 
+/// Pixel coordinates in `i64`: a turn of content near the ends of the `i32` plane (a layer moved
+/// far off the canvas) lands outside it, which `i32` arithmetic would overflow.
+type P64 = (i64, i64);
+
+/// `p` as a pixel of the `i32` plane, if it is one.
+fn narrow((x, y): P64) -> Option<(i32, i32)> {
+    Some((i32::try_from(x).ok()?, i32::try_from(y).ok()?))
+}
+
 impl Orient {
-    /// Where pixel `(x, y)` of a `w × h` canvas goes.
-    pub fn map(self, w: i32, h: i32, x: i32, y: i32) -> (i32, i32) {
+    fn map64(self, w: i64, h: i64, (x, y): P64) -> P64 {
         match self {
             Orient::FlipHorizontal => (w - 1 - x, y),
             Orient::FlipVertical => (x, h - 1 - y),
@@ -34,21 +42,35 @@ impl Orient {
         }
     }
 
-    /// The source pixel that [`Self::map`] sends to `(x, y)`.
-    pub fn inverse(self, w: i32, h: i32, x: i32, y: i32) -> (i32, i32) {
+    fn inverse64(self, w: i64, h: i64, (x, y): P64) -> P64 {
         match self {
             Orient::Cw90 => (y, h - 1 - x),
             Orient::Ccw90 => (w - 1 - y, x),
             // Flips and the half turn are their own inverse.
-            o => o.map(w, h, x, y),
+            o => o.map64(w, h, (x, y)),
         }
     }
 
-    /// The rectangle a (non-empty) rectangle of pixels maps onto.
+    /// Where pixel `(x, y)` of a `w × h` canvas goes; `None` when that is off the `i32` plane.
+    pub fn map(self, w: i32, h: i32, x: i32, y: i32) -> Option<(i32, i32)> {
+        narrow(self.map64(w.into(), h.into(), (x.into(), y.into())))
+    }
+
+    /// The source pixel that [`Self::map`] sends to `(x, y)`; `None` when there is none on the
+    /// `i32` plane.
+    pub fn inverse(self, w: i32, h: i32, x: i32, y: i32) -> Option<(i32, i32)> {
+        narrow(self.inverse64(w.into(), h.into(), (x.into(), y.into())))
+    }
+
+    /// The part of the `i32` plane a (non-empty) rectangle of pixels maps onto (empty when it
+    /// lands entirely off it).
     fn map_rect(self, w: i32, h: i32, r: Rect) -> Rect {
-        let (ax, ay) = self.map(w, h, r.x0, r.y0);
-        let (bx, by) = self.map(w, h, r.x1 - 1, r.y1 - 1);
-        Rect::new(ax.min(bx), ay.min(by), ax.max(bx) + 1, ay.max(by) + 1)
+        let (w, h) = (i64::from(w), i64::from(h));
+        let (ax, ay) = self.map64(w, h, (r.x0.into(), r.y0.into()));
+        let (bx, by) = self.map64(w, h, (i64::from(r.x1) - 1, i64::from(r.y1) - 1));
+        let clamp = |v: i64| v.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+        let (x0, y0, x1, y1) = (clamp(ax.min(bx)), clamp(ay.min(by)), clamp(ax.max(bx) + 1), clamp(ay.max(by) + 1));
+        if x0 >= x1 || y0 >= y1 { Rect::EMPTY } else { Rect::new(x0, y0, x1, y1) }
     }
 }
 
@@ -64,7 +86,9 @@ impl Surface {
         // pixel (a cleared layer) can leave many allocated blank tiles, which would each cost a
         // target tile's allocation and scan for nothing. Gaps read as the default pixel anyway.
         let sources: Vec<TileCoord> = self.tiles.par_iter().filter(|(_, t)| t.data.chunks_exact(bpp).any(|px| px != dp)).map(|(c, _)| *c).collect();
-        let targets: Vec<TileCoord> = sources.iter().flat_map(|c| o.map_rect(w, h, c.rect()).tiles()).collect::<BTreeSet<_>>().into_iter().collect();
+        let targets: Vec<TileCoord> =
+            sources.iter().map(|c| o.map_rect(w, h, c.rect())).filter(|r| !r.is_empty()).flat_map(|r| r.tiles()).collect::<BTreeSet<_>>().into_iter().collect();
+        let (w64, h64) = (i64::from(w), i64::from(h));
         let tiles: Vec<(TileCoord, Arc<Tile>)> = targets
             .par_iter()
             .filter_map(|&dc| {
@@ -74,9 +98,13 @@ impl Surface {
                 let mut cached: Option<(TileCoord, Option<&Arc<Tile>>)> = None;
                 let mut content = false;
                 for (ly, row) in data.chunks_exact_mut(ts * bpp).enumerate() {
-                    let y = origin.y0 + ly as i32;
+                    let y = i64::from(origin.y0) + ly as i64;
                     for (lx, out) in row.chunks_exact_mut(bpp).enumerate() {
-                        let (sx, sy) = o.inverse(w, h, origin.x0 + lx as i32, y);
+                        // A target pixel whose source would be off the `i32` plane has none.
+                        let Some((sx, sy)) = narrow(o.inverse64(w64, h64, (i64::from(origin.x0) + lx as i64, y))) else {
+                            out.copy_from_slice(dp);
+                            continue;
+                        };
                         let sc = TileCoord::containing(sx, sy);
                         let src = match cached {
                             Some((c, t)) if c == sc => t,
@@ -117,8 +145,9 @@ mod tests {
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
                 s.read_pixel(x, y, &mut px);
-                let (nx, ny) = o.map(w, h, x, y);
-                out.write_pixel(nx, ny, &px);
+                if let Some((nx, ny)) = o.map(w, h, x, y) {
+                    out.write_pixel(nx, ny, &px);
+                }
             }
         }
         out
@@ -145,6 +174,9 @@ mod tests {
         }
         let block: Vec<f32> = (0..40 * 30 * n).map(|i| (i % 251) as f32 / 255.0).collect();
         s.write_region(Rect::new(240, 240, 280, 270), &block);
+        // A tile filled entirely with content (an opaque layer has nothing else), no default pixel.
+        let full: Vec<f32> = (0..256 * 256 * n).map(|i| 0.1 + (i % 199) as f32 / 255.0).collect();
+        s.write_region(Rect::new(512, 0, 768, 256), &full);
         s
     }
 
@@ -153,13 +185,13 @@ mod tests {
         let formats =
             [(PixelFormat::RGBA8, vec![0.0; 4]), (PixelFormat::new(ColorMode::Rgb, SampleType::U16, true), vec![0.0; 4]), (PixelFormat::GRAY8, vec![1.0])];
         // Odd sizes that aren't tile multiples, so target tiles straddle source seams.
-        let (w, h) = (601, 300);
+        let (w, h) = (801, 300);
         for (format, default) in formats {
             let s = sample(format, &default);
             for o in [Orient::FlipHorizontal, Orient::FlipVertical, Orient::Rotate180, Orient::Cw90, Orient::Ccw90] {
                 let fast = s.oriented(o, w, h);
                 let slow = naive(&s, o, w, h);
-                assert_same(&fast, &slow, Rect::new(-300, -300, 1000, 1000));
+                assert_same(&fast, &slow, Rect::new(-300, -300, 1100, 1100));
                 assert_eq!(fast.content_bounds(), slow.content_bounds(), "{o:?}");
             }
         }
@@ -170,8 +202,34 @@ mod tests {
         let (w, h) = (37, 11);
         for o in [Orient::FlipHorizontal, Orient::FlipVertical, Orient::Rotate180, Orient::Cw90, Orient::Ccw90] {
             for (x, y) in [(0, 0), (36, 10), (5, 3), (-4, 20)] {
-                let (mx, my) = o.map(w, h, x, y);
-                assert_eq!(o.inverse(w, h, mx, my), (x, y), "{o:?}");
+                let (mx, my) = o.map(w, h, x, y).unwrap();
+                assert_eq!(o.inverse(w, h, mx, my), Some((x, y)), "{o:?}");
+            }
+        }
+    }
+
+    /// Content near the ends of the `i32` plane (a layer moved far off the canvas) turns without
+    /// overflowing, quickly, to where the per-pixel map puts it, or is dropped when that is off
+    /// the plane.
+    #[test]
+    fn content_at_the_ends_of_the_plane_turns_without_overflow() {
+        let (w, h) = (100, 100);
+        let px = [0.2, 0.4, 0.6, 1.0];
+        let far = [(i32::MIN + 200, i32::MIN + 200), (i32::MAX - 200, i32::MAX - 200), (i32::MIN + 5, i32::MAX - 5), (i32::MAX - 1, i32::MIN)];
+        for o in [Orient::FlipHorizontal, Orient::FlipVertical, Orient::Rotate180, Orient::Cw90, Orient::Ccw90] {
+            for (x, y) in far {
+                let mut s = Surface::new(PixelFormat::RGBA8);
+                s.write_pixel(x, y, &px);
+                let t = std::time::Instant::now();
+                let r = s.oriented(o, w, h);
+                assert!(t.elapsed() < std::time::Duration::from_secs(2), "{o:?} ({x}, {y}) took {:?}", t.elapsed());
+                match o.map(w, h, x, y) {
+                    Some((nx, ny)) => {
+                        assert_eq!(r.pixel(nx, ny), px.to_vec(), "{o:?} ({x}, {y})");
+                        assert_eq!(r.tile_count(), 1, "{o:?} ({x}, {y})");
+                    }
+                    None => assert_eq!(r.tile_count(), 0, "{o:?} ({x}, {y}): lands off the plane"),
+                }
             }
         }
     }
