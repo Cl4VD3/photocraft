@@ -586,6 +586,53 @@ fn a_control_request_waits_for_its_queued_save() {
     assert_eq!(reply["result"]["path"], b, "{reply}");
 }
 
+/// A filter started while a save runs locks the document, so the save queued behind that save
+/// can't start when it ends: it waits for the filter instead of being dropped, and quitting or
+/// closing waits for it meanwhile.
+#[test]
+fn a_queued_save_waits_for_a_filter_started_during_the_save() {
+    let mut h = app_harness();
+    let gates = Gates { write: Arc::new(AtomicBool::new(true)), ..Gates::default() };
+    h.state_mut().services.save_file = Some(gates.save(None));
+    let (a, b) = ("/tmp/photocraft-test/filter-a.psd", "/tmp/photocraft-test/filter-b.psd");
+    h.state_mut().save_as(Some(a.into())).unwrap();
+    h.state_mut().save_as(Some(b.into())).expect("queued");
+    let filter = Arc::new(AtomicBool::new(false));
+    slow_job(h.state_mut(), &filter);
+    gates.encode.store(true, Ordering::Relaxed);
+    step_until(&mut h, |app| app.jobs.saves.is_empty());
+    assert_eq!(gates.written(), [a], "the first save ended");
+    assert_eq!(h.state().jobs.queued_saves.len(), 1, "the queued save is kept while the filter runs");
+    assert!(h.state().saving(), "and counts as a save in progress (closing and quitting wait for it)");
+    assert!(!noticed(h.state(), "Save failed"), "not dropped with an error");
+    filter.store(true, Ordering::Relaxed);
+    step_until(&mut h, |app| !app.saving());
+    assert_eq!(gates.written(), [a, b], "it ran once the filter ended");
+    assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(b));
+}
+
+/// File › Revert waits while a save of the document runs, also when the document is clean (no
+/// unsaved-changes prompt stands in the way): it would read the file being written.
+#[test]
+fn revert_waits_for_a_background_save() {
+    let mut h = app_harness();
+    let gates = Gates::open();
+    h.state_mut().services.save_file = Some(gates.save(None));
+    let path = "/tmp/photocraft-test/revert.psd";
+    h.state_mut().save_as(Some(path.into())).unwrap();
+    step_until(&mut h, |a| !a.saving());
+    assert!(!h.state().session.active().unwrap().is_dirty());
+    gates.encode.store(false, Ordering::Relaxed);
+    h.state_mut().save_as(Some(path.into())).unwrap();
+    let ctx = h.ctx.clone();
+    let err = crate::menus::invoke(h.state_mut(), &ctx, "file.revert", json!({})).unwrap_err();
+    assert!(err.contains("still running"), "{err}");
+    assert!(h.state().discard.is_none(), "no prompt either");
+    gates.encode.store(true, Ordering::Relaxed);
+    step_until(&mut h, |a| !a.saving());
+    assert!(crate::jobs_ui::revert_waits_for_save(h.state(), &json!({})).is_ok(), "Revert is allowed again once the save ended");
+}
+
 /// A save of the same file with other export settings, asked for while the first save writes,
 /// still runs once the first has made the document clean.
 #[test]

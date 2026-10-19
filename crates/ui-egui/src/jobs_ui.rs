@@ -161,7 +161,7 @@ pub struct SaveJob {
 
 /// A save waiting for the running save of its document (see [`JobsUi::queued_saves`]).
 pub(crate) struct QueuedSave {
-    doc: DocId,
+    pub(crate) doc: DocId,
     path: String,
     settings: ExportSettings,
     copy: bool,
@@ -414,6 +414,23 @@ pub(crate) fn claim_queued_save(app: &mut PhotocraftApp, reply: Sender<ControlRe
     }
 }
 
+/// File › Revert of a document (the `document` param, else the active one) waits while a save of
+/// it runs or is queued: it would read the file being written, and the save would then record
+/// its revision on the reverted document.
+pub(crate) fn revert_waits_for_save(app: &PhotocraftApp, params: &Value) -> Result<(), String> {
+    let docs = app.session.documents();
+    let target = params.get("document").and_then(Value::as_u64).map(|i| i as usize).or(app.session.active_index());
+    let Some(doc) = target.and_then(|i| docs.get(i)).map(|st| st.doc.id) else { return Ok(()) };
+    let running = app.jobs.saves.iter().find(|s| s.doc == doc && !s.ended).map(|s| &s.path);
+    match running.or_else(|| app.jobs.queued_saves.iter().find(|q| q.doc == doc).map(|q| &q.path)) {
+        Some(path) => {
+            let name = crate::file_open::display_name(path);
+            Err(crate::i18n::fmt(tl!("A save to {name} is still running; try again when it finishes"), &[("name", &name)]))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Drop the saves to `ended`'s file that waited for it (it failed or was cancelled), answering
 /// their control requests with `why`.
 fn drop_queued_saves_to(app: &mut PhotocraftApp, ended: &SaveJob, why: &str) {
@@ -435,10 +452,38 @@ fn answer(waiters: Vec<Sender<ControlResponse>>, reply: Value) {
 /// the document unchanged since) is skipped, and the one after it is considered instead.
 /// `ended_reply` is what `ended`'s control requests got: a skipped save's requests get it too.
 fn start_queued_save(app: &mut PhotocraftApp, ended: &SaveJob, ended_reply: &Value) {
-    while let Some(i) = app.jobs.queued_saves.iter().position(|q| q.doc == ended.doc) {
+    start_queued_saves_of(app, ended.doc, Some((ended, ended_reply)));
+}
+
+/// Start the queued saves that were held back because another job (a filter started while the
+/// save before them ran) had the document locked, once nothing runs on it any more.
+fn resume_queued_saves(app: &mut PhotocraftApp) {
+    let mut docs: Vec<DocId> = app.jobs.queued_saves.iter().map(|q| q.doc).collect();
+    docs.dedup();
+    for doc in docs {
+        if !app.jobs.saves.iter().any(|s| s.doc == doc && !s.ended) {
+            start_queued_saves_of(app, doc, None);
+        }
+    }
+}
+
+/// [`start_queued_save`] for `doc`, after `ended` (with its reply) when a save of it just ended.
+/// While another job has the document locked the saves stay queued: [`resume_queued_saves`]
+/// starts them when it ends.
+fn start_queued_saves_of(app: &mut PhotocraftApp, doc: DocId, ended: Option<(&SaveJob, &Value)>) {
+    while let Some(i) = app.jobs.queued_saves.iter().position(|q| q.doc == doc) {
+        if app.session.job_on(doc).is_some() {
+            return;
+        }
         let q = app.jobs.queued_saves.remove(i);
         let clean = app.session.documents().iter().find(|st| st.doc.id == q.doc).is_none_or(|st| !st.is_dirty());
-        if !q.copy && !ended.copy && clean && q.path == ended.path && q.settings == ended.settings {
+        if let Some((ended, ended_reply)) = ended
+            && !q.copy
+            && !ended.copy
+            && clean
+            && q.path == ended.path
+            && q.settings == ended.settings
+        {
             answer(q.waiters, ended_reply.clone());
             continue;
         }
@@ -479,6 +524,9 @@ fn close_after_saves(app: &mut PhotocraftApp, ctx: &egui::Context) {
 pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
     for e in app.session.poll_jobs() {
         on_event(app, ctx, e);
+    }
+    if !app.jobs.queued_saves.is_empty() {
+        resume_queued_saves(app);
     }
     // A focused open tab that ended (or was cancelled elsewhere) gives way to the documents.
     if app.jobs.focus.is_some_and(|j| !app.jobs.opens.iter().any(|o| o.job == j)) {

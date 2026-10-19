@@ -1756,9 +1756,9 @@ impl PhotocraftApp {
         self.session.jobs().iter().any(|j| matches!(j.command.as_str(), "file.print" | "file.printOneCopy"))
     }
 
-    /// A save is running in the background.
+    /// A save is running in the background, or waiting to (queued behind another).
     pub(crate) fn saving(&self) -> bool {
-        !self.jobs.saves.is_empty()
+        !self.jobs.saves.is_empty() || !self.jobs.queued_saves.is_empty()
     }
 
     /// Save through the control session's capability-scoped writer. No file
