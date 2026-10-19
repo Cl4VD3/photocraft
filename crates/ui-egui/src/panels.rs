@@ -3833,7 +3833,8 @@ fn field_hsva(mut hsva: egui::ecolor::Hsva, remembered: (f32, f32)) -> egui::eco
     hsva
 }
 
-/// Photoshop Color panel: saturation/brightness field + hue strip, drawn as shaded meshes.
+/// Photoshop Color panel: saturation/brightness field + hue strip, drawn as shaded meshes, or a
+/// hue wheel around a square or triangle (the buttons under the chips, [`wheel_mode_buttons`]).
 fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let bg_active = app.ui.color_panel.background;
@@ -3849,68 +3850,21 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     // Only Photoshop's themes stretch it over the group: the other themes put sliders under it.
     let fill = if t.pro { ui.data(|d| d.get_temp::<f32>(color_field_fill_id())) } else { None };
     let h = color_field_height(fill, w);
+    let mode = app.ui.color_panel.wheel;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let (chips, _) = ui.allocate_exact_size(vec2(38.0, h), Sense::hover());
         field_chips(app, ui, chips);
-        // SV field.
-        let field_w = w - 38.0 - strip_w - 16.0;
-        let (field, fresp) = ui.allocate_exact_size(vec2(field_w, h), Sense::click_and_drag());
-        let mut mesh = egui::Mesh::default();
-        let n = 16;
-        for j in 0..=n {
-            for i in 0..=n {
-                let (sx, vy) = (i as f32 / n as f32, j as f32 / n as f32);
-                let c = hsva_color32(egui::ecolor::Hsva::new(hsva.h, sx, 1.0 - vy, 1.0));
-                mesh.colored_vertex(pos2(field.left() + sx * field.width(), field.top() + vy * field.height()), c);
-            }
-        }
-        for j in 0..n {
-            for i in 0..n {
-                let a = (j * (n + 1) + i) as u32;
-                let b = a + 1;
-                let c = a + (n + 1) as u32;
-                let d = c + 1;
-                mesh.add_triangle(a, b, d);
-                mesh.add_triangle(a, d, c);
-            }
-        }
-        ui.painter().add(mesh);
-        ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
-        if (fresp.dragged() || fresp.clicked())
-            && let Some(p) = fresp.interact_pointer_pos()
-        {
-            hsva.s = ((p.x - field.left()) / field.width()).clamp(0.0, 1.0);
-            hsva.v = 1.0 - ((p.y - field.top()) / field.height()).clamp(0.0, 1.0);
-        }
-        let knob = pos2(field.left() + hsva.s * field.width(), field.top() + (1.0 - hsva.v) * field.height());
-        ui.painter().circle_stroke(knob, 5.0, Stroke::new(1.5, Color32::WHITE));
-        ui.painter().circle_stroke(knob, 6.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
-        // Hue strip.
-        let (strip, sresp) = ui.allocate_exact_size(vec2(strip_w, h), Sense::click_and_drag());
-        let mut m2 = egui::Mesh::default();
-        let steps = 24;
-        for k in 0..=steps {
-            let f = k as f32 / steps as f32;
-            let c = hsva_color32(egui::ecolor::Hsva::new(1.0 - f, 1.0, 1.0, 1.0));
-            m2.colored_vertex(pos2(strip.left(), strip.top() + f * strip.height()), c);
-            m2.colored_vertex(pos2(strip.right(), strip.top() + f * strip.height()), c);
-        }
-        for k in 0..steps {
-            let a = (k * 2) as u32;
-            m2.add_triangle(a, a + 1, a + 3);
-            m2.add_triangle(a, a + 3, a + 2);
-        }
-        ui.painter().add(m2);
-        if (sresp.dragged() || sresp.clicked())
-            && let Some(p) = sresp.interact_pointer_pos()
-        {
-            hsva.h = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 0.9999);
-        }
-        let y = strip.top() + (1.0 - hsva.h) * strip.height();
-        let tri = vec![pos2(strip.right() + 1.0, y), pos2(strip.right() + 6.0, y - 4.0), pos2(strip.right() + 6.0, y + 4.0)];
-        ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
-        if fresp.dragged() || fresp.clicked() || sresp.dragged() || sresp.clicked() {
+        wheel_mode_buttons(app, ui, chips);
+        let changed = if mode == crate::state::ColorWheel::Spectrum {
+            spectrum_field(ui, &mut hsva, w - 38.0 - strip_w - 16.0, strip_w, h, &t)
+        } else {
+            // The wheel takes the field's and the hue strip's room, and at least a square of the
+            // panel's width (up to 220 pt) when the field would be shorter.
+            let aw = w - 38.0 - 8.0;
+            color_wheel(ui, &mut hsva, mode, vec2(aw, h.max(aw.min(220.0))), &t)
+        };
+        if changed {
             if bg_active {
                 app.session.tools.background = hsva_srgb(hsva);
             } else {
@@ -3938,6 +3892,263 @@ fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         }
     });
+}
+
+/// The Color panel's original Photoshop field: a saturation/brightness square `field_w` wide and
+/// a hue strip beside it. Returns whether a click or drag changed `hsva`.
+fn spectrum_field(ui: &mut egui::Ui, hsva: &mut egui::ecolor::Hsva, field_w: f32, strip_w: f32, h: f32, t: &Tokens) -> bool {
+    let (field, fresp) = ui.allocate_exact_size(vec2(field_w, h), Sense::click_and_drag());
+    ui.painter().add(sv_square_mesh(field, hsva.h));
+    ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
+    if (fresp.dragged() || fresp.clicked())
+        && let Some(p) = fresp.interact_pointer_pos()
+    {
+        hsva.s = ((p.x - field.left()) / field.width()).clamp(0.0, 1.0);
+        hsva.v = 1.0 - ((p.y - field.top()) / field.height()).clamp(0.0, 1.0);
+    }
+    let knob = pos2(field.left() + hsva.s * field.width(), field.top() + (1.0 - hsva.v) * field.height());
+    color_knob(ui.painter(), knob);
+    // Hue strip.
+    let (strip, sresp) = ui.allocate_exact_size(vec2(strip_w, h), Sense::click_and_drag());
+    let mut m2 = egui::Mesh::default();
+    let steps = 24;
+    for k in 0..=steps {
+        let f = k as f32 / steps as f32;
+        let c = hsva_color32(egui::ecolor::Hsva::new(1.0 - f, 1.0, 1.0, 1.0));
+        m2.colored_vertex(pos2(strip.left(), strip.top() + f * strip.height()), c);
+        m2.colored_vertex(pos2(strip.right(), strip.top() + f * strip.height()), c);
+    }
+    for k in 0..steps {
+        let a = (k * 2) as u32;
+        m2.add_triangle(a, a + 1, a + 3);
+        m2.add_triangle(a, a + 3, a + 2);
+    }
+    ui.painter().add(m2);
+    if (sresp.dragged() || sresp.clicked())
+        && let Some(p) = sresp.interact_pointer_pos()
+    {
+        hsva.h = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 0.9999);
+    }
+    let y = strip.top() + (1.0 - hsva.h) * strip.height();
+    let tri = vec![pos2(strip.right() + 1.0, y), pos2(strip.right() + 6.0, y - 4.0), pos2(strip.right() + 6.0, y + 4.0)];
+    ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
+    fresp.dragged() || fresp.clicked() || sresp.dragged() || sresp.clicked()
+}
+
+/// The saturation (left to right) / brightness (bottom to top) square of hue `hue` filling `r`.
+fn sv_square_mesh(r: Rect, hue: f32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    let n = 16;
+    for j in 0..=n {
+        for i in 0..=n {
+            let (sx, vy) = (i as f32 / n as f32, j as f32 / n as f32);
+            let c = hsva_color32(egui::ecolor::Hsva::new(hue, sx, 1.0 - vy, 1.0));
+            mesh.colored_vertex(pos2(r.left() + sx * r.width(), r.top() + vy * r.height()), c);
+        }
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let a = (j * (n + 1) + i) as u32;
+            let b = a + 1;
+            let c = a + (n + 1) as u32;
+            let d = c + 1;
+            mesh.add_triangle(a, b, d);
+            mesh.add_triangle(a, d, c);
+        }
+    }
+    mesh
+}
+
+/// The ring marker of the colour fields: white inside a dark outline, visible on any colour.
+fn color_knob(p: &egui::Painter, at: egui::Pos2) {
+    p.circle_stroke(at, 5.0, Stroke::new(1.5, Color32::WHITE));
+    p.circle_stroke(at, 6.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+}
+
+/// The three buttons under the Color panel's chips that switch its field: Photoshop's spectrum
+/// (saturation/brightness field and hue strip), a hue wheel around a saturation/brightness
+/// square, or a hue wheel around an HSV triangle (as in Clip Studio Paint).
+fn wheel_mode_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, chips: Rect) {
+    use crate::state::ColorWheel;
+    let t = Tokens::get(ui.ctx());
+    let modes = [
+        (ColorWheel::Spectrum, "rectangle-horizontal", tl!("Color field and hue strip")),
+        (ColorWheel::Square, "square", tl!("Color wheel with a square")),
+        (ColorWheel::Triangle, "triangle", tl!("Color wheel with a triangle")),
+    ];
+    let size = 18.0;
+    let x = chips.center().x - size / 2.0;
+    for (k, (mode, icon, tip)) in modes.into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, chips.top() + 44.0 + k as f32 * (size + 3.0)), vec2(size, size));
+        if r.bottom() > chips.bottom() {
+            break;
+        }
+        let resp = ui.interact(r, ui.id().with(("color-wheel-mode", k)), Sense::click()).on_hover_text(tip);
+        let selected = app.ui.color_panel.wheel == mode;
+        let color = crate::icons::button_chrome(ui, r, selected, resp.hovered());
+        crate::icons::paint(ui, r, icon, 11.0, if selected || resp.hovered() { color } else { t.text_dim });
+        if resp.clicked() {
+            app.ui.color_panel.wheel = mode;
+        }
+    }
+}
+
+/// Where the parts of a colour wheel in a rectangle sit: its centre and the hue ring's radii.
+struct WheelGeom {
+    c: egui::Pos2,
+    outer: f32,
+    inner: f32,
+}
+
+impl WheelGeom {
+    fn new(rect: Rect) -> Self {
+        let outer = (rect.width().min(rect.height()) / 2.0 - 2.0).max(8.0);
+        let ring = (outer * 0.16).clamp(8.0, 22.0);
+        Self { c: rect.center(), outer, inner: outer - ring }
+    }
+
+    /// The point at `radius` in the direction of hue `h` (red to the right, anticlockwise).
+    fn at(&self, h: f32, radius: f32) -> egui::Pos2 {
+        let a = h * std::f32::consts::TAU;
+        self.c + vec2(a.cos(), -a.sin()) * radius
+    }
+
+    /// The hue in the direction of `p` from the centre.
+    fn hue(&self, p: egui::Pos2) -> f32 {
+        let d = p - self.c;
+        ((-d.y).atan2(d.x) / std::f32::consts::TAU).rem_euclid(1.0)
+    }
+
+    /// The saturation/brightness square inside the ring.
+    fn square(&self) -> Rect {
+        let half = self.inner * std::f32::consts::FRAC_1_SQRT_2 - 3.0;
+        Rect::from_center_size(self.c, vec2(2.0 * half, 2.0 * half))
+    }
+
+    /// The HSV triangle inside the ring, pointing at hue `h`: pure hue, white, black corners.
+    fn triangle(&self, h: f32) -> [egui::Pos2; 3] {
+        let r = self.inner - 3.0;
+        [self.at(h, r), self.at(h + 1.0 / 3.0, r), self.at(h + 2.0 / 3.0, r)]
+    }
+}
+
+/// Saturation and brightness at `p` in the HSV triangle `[hue, white, black]`: its barycentric
+/// weights, clamped into the triangle (a drag outside follows its edge). The saturation is
+/// `None` at black, where it is undefined.
+fn triangle_sv(tri: [egui::Pos2; 3], p: egui::Pos2) -> (Option<f32>, f32) {
+    let [a, b, c] = tri;
+    let det = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+    if det.abs() < 1e-6 {
+        return (None, 0.0);
+    }
+    let wa = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / det;
+    let wb = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / det;
+    let (wa, wb, wc) = (wa.max(0.0), wb.max(0.0), (1.0 - wa - wb).max(0.0));
+    let sum = wa + wb + wc;
+    let (wa, wb) = (wa / sum, wb / sum);
+    let v = (wa + wb).clamp(0.0, 1.0);
+    (if v > 1e-4 { Some((wa / v).clamp(0.0, 1.0)) } else { None }, v)
+}
+
+/// The point of the HSV triangle `[hue, white, black]` with saturation `s` and brightness `v`.
+fn triangle_point(tri: [egui::Pos2; 3], s: f32, v: f32) -> egui::Pos2 {
+    tri[2] + (tri[0] - tri[2]) * (v * s) + (tri[1] - tri[2]) * (v * (1.0 - s))
+}
+
+/// A hue ring around a saturation/brightness square or HSV triangle, `size` points. A press on the
+/// ring drags the hue, inside it the saturation and brightness. Returns whether `hsva` changed.
+fn color_wheel(ui: &mut egui::Ui, hsva: &mut egui::ecolor::Hsva, mode: crate::state::ColorWheel, size: egui::Vec2, t: &Tokens) -> bool {
+    use crate::state::ColorWheel;
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let g = WheelGeom::new(rect);
+    // Which part the press started on, kept for the whole drag: the ring (hue) or the inner shape.
+    let part_id = ui.id().with("color-wheel-part");
+    if ((resp.is_pointer_button_down_on() && ui.data(|d| d.get_temp::<bool>(part_id)).is_none()) || resp.clicked())
+        && let Some(at) = resp.interact_pointer_pos()
+    {
+        let on_ring = (at - g.c).length() >= g.inner - 1.0;
+        ui.data_mut(|d| d.insert_temp(part_id, on_ring));
+    }
+    let mut changed = false;
+    if (resp.dragged() || resp.clicked())
+        && let Some(at) = resp.interact_pointer_pos()
+        && let Some(on_ring) = ui.data(|d| d.get_temp::<bool>(part_id))
+    {
+        if on_ring {
+            hsva.h = g.hue(at);
+        } else if mode == ColorWheel::Triangle {
+            let (s, v) = triangle_sv(g.triangle(hsva.h), at);
+            if let Some(s) = s {
+                hsva.s = s;
+            }
+            hsva.v = v;
+        } else {
+            let sq = g.square();
+            hsva.s = ((at.x - sq.left()) / sq.width()).clamp(0.0, 1.0);
+            hsva.v = 1.0 - ((at.y - sq.top()) / sq.height()).clamp(0.0, 1.0);
+        }
+        changed = true;
+    }
+    if !resp.is_pointer_button_down_on() {
+        ui.data_mut(|d| d.remove::<bool>(part_id));
+    }
+    let p = ui.painter();
+    // The hue ring.
+    let segs = 96;
+    let mut ring = egui::Mesh::default();
+    for k in 0..=segs {
+        let h = k as f32 / segs as f32;
+        let c = hsva_color32(egui::ecolor::Hsva::new(h, 1.0, 1.0, 1.0));
+        ring.colored_vertex(g.at(h, g.inner), c);
+        ring.colored_vertex(g.at(h, g.outer), c);
+    }
+    for k in 0..segs {
+        let a = (k * 2) as u32;
+        ring.add_triangle(a, a + 1, a + 3);
+        ring.add_triangle(a, a + 3, a + 2);
+    }
+    p.add(ring);
+    p.circle_stroke(g.c, g.outer, Stroke::new(1.0, t.separator));
+    p.circle_stroke(g.c, g.inner, Stroke::new(1.0, t.separator));
+    // The inner shape, drawn with the (possibly just changed) hue.
+    let knob = if mode == ColorWheel::Triangle {
+        let tri = g.triangle(hsva.h);
+        let n = 24u32;
+        let mut mesh = egui::Mesh::default();
+        // Rows from the black corner (v = 0) to the hue–white edge (v = 1); along a row the
+        // saturation runs from white (s = 0) to the pure hue (s = 1).
+        for j in 0..=n {
+            let v = j as f32 / n as f32;
+            for i in 0..=j {
+                let s = if j == 0 { 0.0 } else { i as f32 / j as f32 };
+                mesh.colored_vertex(triangle_point(tri, s, v), hsva_color32(egui::ecolor::Hsva::new(hsva.h, s, v, 1.0)));
+            }
+        }
+        let idx = |j: u32, i: u32| j * (j + 1) / 2 + i;
+        for j in 0..n {
+            for i in 0..=j {
+                mesh.add_triangle(idx(j, i), idx(j + 1, i), idx(j + 1, i + 1));
+                if i < j {
+                    mesh.add_triangle(idx(j, i), idx(j + 1, i + 1), idx(j, i + 1));
+                }
+            }
+        }
+        p.add(mesh);
+        p.add(egui::Shape::closed_line(tri.to_vec(), Stroke::new(1.0, t.separator)));
+        triangle_point(tri, hsva.s, hsva.v)
+    } else {
+        let sq = g.square();
+        p.add(sv_square_mesh(sq, hsva.h));
+        p.rect_stroke(sq, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
+        pos2(sq.left() + hsva.s * sq.width(), sq.top() + (1.0 - hsva.v) * sq.height())
+    };
+    color_knob(p, knob);
+    // The hue marker on the ring.
+    let at = g.at(hsva.h, (g.inner + g.outer) / 2.0);
+    let r = ((g.outer - g.inner) / 2.0).min(7.0);
+    p.circle_stroke(at, r, Stroke::new(1.5, Color32::WHITE));
+    p.circle_stroke(at, r + 1.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+    changed
 }
 
 /// Tool colours are sRGB-encoded floats; egui's Hsva works on sRGB bytes via these helpers
@@ -4726,6 +4937,93 @@ mod color_tests {
         for pressed in [true, false] {
             h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
             h.run_steps(1);
+        }
+    }
+
+    /// The wheel's rectangle in a 300 pt [`field_harness`]: right of the 38 pt chips and the gap.
+    fn wheel_geom(h: &egui_kittest::Harness<'_, PhotocraftApp>) -> WheelGeom {
+        let w = h.ctx.content_rect().width() - 16.0;
+        let aw = w - 38.0 - 8.0;
+        let size = vec2(aw, color_field_height(None, w).max(aw.min(220.0)));
+        WheelGeom::new(Rect::from_min_size(pos2(8.0 + 38.0 + 8.0, 8.0), size))
+    }
+
+    /// The colour wheels: the ring picks the hue, the square or triangle inside it the saturation
+    /// and brightness; the mode buttons under the chips switch between them and the spectrum.
+    #[test]
+    fn color_wheel_picks_hue_on_the_ring_and_tone_inside() {
+        use crate::state::ColorWheel;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
+        let mut h = field_harness(app);
+        // The second mode button (y = chips top + 44 + 21) picks the square wheel.
+        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 21.0 + 9.0));
+        assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Square);
+        let g = wheel_geom(&h);
+        // A third of the way round the ring (anticlockwise from red) is green.
+        click(&mut h, g.at(1.0 / 3.0, (g.inner + g.outer) / 2.0));
+        let hsv = srgb_hsva(h.state().session.tools.foreground);
+        assert!((hsv.h - 1.0 / 3.0).abs() < 0.02, "hue {}", hsv.h);
+        // The square's bottom-left quarter point: 25 % saturation, 25 % brightness.
+        let sq = g.square();
+        click(&mut h, pos2(sq.left() + sq.width() * 0.25, sq.top() + sq.height() * 0.75));
+        let hsv = srgb_hsva(h.state().session.tools.foreground);
+        assert!((hsv.s - 0.25).abs() < 0.03 && (hsv.v - 0.25).abs() < 0.03, "{hsv:?}");
+        assert!((hsv.h - 1.0 / 3.0).abs() < 0.02, "the hue stays");
+        // The triangle: its corners are the pure hue, white and black.
+        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 42.0 + 9.0));
+        assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Triangle);
+        let tri = g.triangle(srgb_hsva(h.state().session.tools.foreground).h);
+        let toward = |corner: egui::Pos2| corner + (g.c - corner) * 0.02;
+        click(&mut h, toward(tri[0]));
+        let [r, gr, b] = srgb_bytes(h.state().session.tools.foreground);
+        assert!(gr > 240 && r < 30 && b < 30, "pure green {r} {gr} {b}");
+        let tri = g.triangle(1.0 / 3.0);
+        click(&mut h, toward(tri[1]));
+        assert!(srgb_bytes(h.state().session.tools.foreground).iter().all(|c| *c > 235), "white");
+        click(&mut h, toward(tri[2]));
+        assert!(srgb_bytes(h.state().session.tools.foreground).iter().all(|c| *c < 20), "black");
+        // Back to Photoshop's spectrum.
+        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 9.0));
+        assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Spectrum);
+    }
+
+    /// The triangle's barycentric pick: corners and the clamp outside it.
+    #[test]
+    fn triangle_sv_reads_corners_and_clamps() {
+        let tri = [pos2(100.0, 0.0), pos2(0.0, 0.0), pos2(50.0, 80.0)];
+        assert_eq!(triangle_sv(tri, tri[0]), (Some(1.0), 1.0));
+        assert_eq!(triangle_sv(tri, tri[1]), (Some(0.0), 1.0));
+        assert_eq!(triangle_sv(tri, tri[2]).1, 0.0);
+        let (s, v) = triangle_sv(tri, pos2(50.0, -40.0));
+        assert!(v > 0.99 && s.is_some_and(|s| (s - 0.5).abs() < 0.01), "outside the top edge clamps onto it");
+        let p = triangle_point(tri, 0.3, 0.6);
+        let (s, v) = triangle_sv(tri, p);
+        assert!((s.unwrap() - 0.3).abs() < 1e-4 && (v - 0.6).abs() < 1e-4);
+    }
+
+    /// Renders the Color panel in each mode to `target/color-wheel-*.png` for a visual check
+    /// (`cargo test -p photocraft-ui-egui --lib color_wheel_screenshots -- --ignored`).
+    #[test]
+    #[ignore = "writes PNGs for a visual check"]
+    fn color_wheel_screenshots() {
+        use crate::state::ColorWheel;
+        for (mode, name) in [(ColorWheel::Spectrum, "spectrum"), (ColorWheel::Square, "square"), (ColorWheel::Triangle, "triangle")] {
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+            app.session.tools.foreground = [0.85, 0.35, 0.2, 1.0];
+            app.ui.color_panel.wheel = mode;
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 290.0)).with_pixels_per_point(2.0).build_ui_state(
+                |ui, app: &mut PhotocraftApp| {
+                    if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                        egui::Frame::NONE.fill(Tokens::get(ui.ctx()).dock).show(ui, |ui| color_field(app, ui));
+                    }
+                },
+                app,
+            );
+            PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+            h.run_steps(3);
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+            h.render().unwrap().save(dir.join(format!("color-wheel-{name}.png"))).unwrap();
         }
     }
 

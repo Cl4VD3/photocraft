@@ -1057,6 +1057,22 @@ pub struct ColorPanelState {
     /// Color Picker › Only Web Colors, kept across opens like Photoshop (#4995).
     #[serde(default)]
     pub web_only: bool,
+    /// What the Color panel's field shows: Photoshop's spectrum, or a colour wheel.
+    #[serde(default)]
+    pub wheel: ColorWheel,
+}
+
+/// The Color panel's field (the buttons under its colour chips).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorWheel {
+    /// Photoshop's saturation/brightness field with a hue strip.
+    #[default]
+    Spectrum,
+    /// A hue ring around a saturation/brightness square.
+    Square,
+    /// A hue ring around an HSV triangle.
+    Triangle,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
