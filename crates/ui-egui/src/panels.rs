@@ -3983,8 +3983,11 @@ fn wheel_mode_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, chips: Rect) {
         if r.bottom() > chips.bottom() {
             break;
         }
-        let resp = ui.interact(r, ui.id().with(("color-wheel-mode", k)), Sense::click()).on_hover_text(tip);
         let selected = app.ui.color_panel.wheel == mode;
+        let resp = ui.interact(r, ui.id().with(("color-wheel-mode", k)), Sense::click());
+        // Named and marked selected for assistive technology and the control channel.
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, tip));
+        let resp = resp.on_hover_text(tip);
         let color = crate::icons::button_chrome(ui, r, selected, resp.hovered());
         crate::icons::paint(ui, r, icon, 11.0, if selected || resp.hovered() { color } else { t.text_dim });
         if resp.clicked() {
@@ -4953,11 +4956,12 @@ mod color_tests {
     #[test]
     fn color_wheel_picks_hue_on_the_ring_and_tone_inside() {
         use crate::state::ColorWheel;
+        use egui_kittest::kittest::Queryable;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
         let mut h = field_harness(app);
-        // The second mode button (y = chips top + 44 + 21) picks the square wheel.
-        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 21.0 + 9.0));
+        h.get_by_label("Color wheel with a square").click();
+        h.run_steps(2);
         assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Square);
         let g = wheel_geom(&h);
         // A third of the way round the ring (anticlockwise from red) is green.
@@ -4971,7 +4975,8 @@ mod color_tests {
         assert!((hsv.s - 0.25).abs() < 0.03 && (hsv.v - 0.25).abs() < 0.03, "{hsv:?}");
         assert!((hsv.h - 1.0 / 3.0).abs() < 0.02, "the hue stays");
         // The triangle: its corners are the pure hue, white and black.
-        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 42.0 + 9.0));
+        h.get_by_label("Color wheel with a triangle").click();
+        h.run_steps(2);
         assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Triangle);
         let tri = g.triangle(srgb_hsva(h.state().session.tools.foreground).h);
         let toward = |corner: egui::Pos2| corner + (g.c - corner) * 0.02;
@@ -4984,7 +4989,8 @@ mod color_tests {
         click(&mut h, toward(tri[2]));
         assert!(srgb_bytes(h.state().session.tools.foreground).iter().all(|c| *c < 20), "black");
         // Back to Photoshop's spectrum.
-        click(&mut h, pos2(8.0 + 19.0, 8.0 + 44.0 + 9.0));
+        h.get_by_label("Color field and hue strip").click();
+        h.run_steps(2);
         assert_eq!(h.state().ui.color_panel.wheel, ColorWheel::Spectrum);
     }
 
