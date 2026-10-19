@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
+use photocraft_geom::{TILE_SIZE, TileCoord};
 use rayon::prelude::*;
 
 use crate::{Surface, Tile};
@@ -62,15 +62,21 @@ impl Orient {
         narrow(self.inverse64(w.into(), h.into(), (x.into(), y.into())))
     }
 
-    /// The part of the `i32` plane a (non-empty) rectangle of pixels maps onto (empty when it
-    /// lands entirely off it).
-    fn map_rect(self, w: i32, h: i32, r: Rect) -> Rect {
-        let (w, h) = (i64::from(w), i64::from(h));
-        let (ax, ay) = self.map64(w, h, (r.x0.into(), r.y0.into()));
-        let (bx, by) = self.map64(w, h, (i64::from(r.x1) - 1, i64::from(r.y1) - 1));
-        let clamp = |v: i64| v.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
-        let (x0, y0, x1, y1) = (clamp(ax.min(bx)), clamp(ay.min(by)), clamp(ax.max(bx) + 1), clamp(ay.max(by) + 1));
-        if x0 >= x1 || y0 >= y1 { Rect::EMPTY } else { Rect::new(x0, y0, x1, y1) }
+    /// The target tiles source tile `c` maps onto, within the `i32` plane (none when it lands
+    /// entirely off it). Worked out in `i64` with inclusive bounds rather than through a
+    /// [`Rect`](photocraft_geom::Rect), whose half-open end can't hold the pixel at `i32::MAX`.
+    fn target_tiles(self, w: i32, h: i32, c: TileCoord) -> impl Iterator<Item = TileCoord> {
+        let (w, h, ts) = (i64::from(w), i64::from(h), i64::from(TILE_SIZE));
+        let (x0, y0) = (i64::from(c.tx) * ts, i64::from(c.ty) * ts);
+        let (ax, ay) = self.map64(w, h, (x0, y0));
+        let (bx, by) = self.map64(w, h, (x0 + ts - 1, y0 + ts - 1));
+        let span = |a: i64, b: i64| {
+            let (lo, hi) = (a.min(b).max(i32::MIN.into()), a.max(b).min(i32::MAX.into()));
+            // Tile indices of the `i32` plane fit in `i32`.
+            (lo.div_euclid(ts) as i32)..=(hi.div_euclid(ts) as i32)
+        };
+        let (xs, ys) = (span(ax, bx), span(ay, by));
+        ys.flat_map(move |ty| xs.clone().map(move |tx| TileCoord::new(tx, ty)))
     }
 }
 
@@ -86,22 +92,22 @@ impl Surface {
         // pixel (a cleared layer) can leave many allocated blank tiles, which would each cost a
         // target tile's allocation and scan for nothing. Gaps read as the default pixel anyway.
         let sources: Vec<TileCoord> = self.tiles.par_iter().filter(|(_, t)| t.data.chunks_exact(bpp).any(|px| px != dp)).map(|(c, _)| *c).collect();
-        let targets: Vec<TileCoord> =
-            sources.iter().map(|c| o.map_rect(w, h, c.rect())).filter(|r| !r.is_empty()).flat_map(|r| r.tiles()).collect::<BTreeSet<_>>().into_iter().collect();
+        let targets: Vec<TileCoord> = sources.iter().flat_map(|&c| o.target_tiles(w, h, c)).collect::<BTreeSet<_>>().into_iter().collect();
         let (w64, h64) = (i64::from(w), i64::from(h));
         let tiles: Vec<(TileCoord, Arc<Tile>)> = targets
             .par_iter()
             .filter_map(|&dc| {
-                let origin = dc.rect();
+                // In `i64`: the last tile column's `Rect` stops short of the pixel at `i32::MAX`.
+                let (ox, oy) = (i64::from(dc.tx) * i64::from(TILE_SIZE), i64::from(dc.ty) * i64::from(TILE_SIZE));
                 let mut data = vec![0u8; ts * ts * bpp];
                 // Consecutive target pixels nearly always come from the same source tile.
                 let mut cached: Option<(TileCoord, Option<&Arc<Tile>>)> = None;
                 let mut content = false;
                 for (ly, row) in data.chunks_exact_mut(ts * bpp).enumerate() {
-                    let y = i64::from(origin.y0) + ly as i64;
+                    let y = oy + ly as i64;
                     for (lx, out) in row.chunks_exact_mut(bpp).enumerate() {
                         // A target pixel whose source would be off the `i32` plane has none.
-                        let Some((sx, sy)) = narrow(o.inverse64(w64, h64, (i64::from(origin.x0) + lx as i64, y))) else {
+                        let Some((sx, sy)) = narrow(o.inverse64(w64, h64, (ox + lx as i64, y))) else {
                             out.copy_from_slice(dp);
                             continue;
                         };
@@ -136,6 +142,7 @@ impl Surface {
 mod tests {
     use super::*;
     use photocraft_color::{ColorMode, PixelFormat, SampleType};
+    use photocraft_geom::Rect;
 
     /// The plain per-pixel remap this replaces (`photocraft_engine::pixels::remap_surface`).
     fn naive(s: &Surface, o: Orient, w: i32, h: i32) -> Surface {
@@ -213,10 +220,26 @@ mod tests {
     /// the plane.
     #[test]
     fn content_at_the_ends_of_the_plane_turns_without_overflow() {
-        let (w, h) = (100, 100);
         let px = [0.2, 0.4, 0.6, 1.0];
-        let far = [(i32::MIN + 200, i32::MIN + 200), (i32::MAX - 200, i32::MAX - 200), (i32::MIN + 5, i32::MAX - 5), (i32::MAX - 1, i32::MIN)];
-        for o in [Orient::FlipHorizontal, Orient::FlipVertical, Orient::Rotate180, Orient::Cw90, Orient::Ccw90] {
+        // Includes the very last pixels of the plane, and (on a 255 px canvas) pixels every turn
+        // sends exactly to `i32::MAX` on one axis or both.
+        let far = [
+            (i32::MIN + 200, i32::MIN + 200),
+            (i32::MAX - 200, i32::MAX - 200),
+            (i32::MIN + 5, i32::MAX - 5),
+            (i32::MAX - 1, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, 0),
+            (0, i32::MAX),
+            (i32::MIN + 255, 0),
+            (0, i32::MIN + 255),
+            (i32::MIN + 255, i32::MIN + 255),
+        ];
+        for ((w, h), o) in [(100, 100), (255, 255)]
+            .into_iter()
+            .flat_map(|s| [Orient::FlipHorizontal, Orient::FlipVertical, Orient::Rotate180, Orient::Cw90, Orient::Ccw90].map(|o| (s, o)))
+        {
             for (x, y) in far {
                 let mut s = Surface::new(PixelFormat::RGBA8);
                 s.write_pixel(x, y, &px);
@@ -232,6 +255,8 @@ mod tests {
                 }
             }
         }
+        // The pixel CodeRabbit found: (i32::MIN + 255, 0) flips onto (i32::MAX, 0) on a 255 px canvas.
+        assert_eq!(Orient::FlipHorizontal.map(255, 255, i32::MIN + 255, 0), Some((i32::MAX, 0)));
     }
 
     #[test]
