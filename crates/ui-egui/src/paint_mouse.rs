@@ -153,6 +153,16 @@ fn barrel_opens_picker(app: &PhotocraftApp, tool: Tool) -> bool {
 /// swallowed (nothing paints) and opens it where the pen lifts. True while such a tap is held.
 pub(crate) fn barrel_tap(app: &mut PhotocraftApp, response: &Response, tool: Tool) -> bool {
     let ctx = &response.ctx;
+    // The button's state is set whatever the window shows. What it did while no canvas handled
+    // the pen (the Home screen, a Hand pan, a Levels eyedropper) is dropped, so it can't open the
+    // picker later or arm the next ordinary tap.
+    let frame = ctx.cumulative_frame_nr();
+    let handled = ctx.data(|d| d.get_temp::<u64>(barrel_frame_id()));
+    ctx.data_mut(|d| d.insert_temp(barrel_frame_id(), frame));
+    if handled.is_none_or(|f| frame > f + 1) {
+        let _ = app.stylus.feed.take_click();
+        let _ = app.stylus.feed.take_barrel();
+    }
     // Where the picker opens: the pointer over the canvas, or, when the pointer is gone, where it
     // last was over it. The pen's emulated click ends its touch contact, after which egui reports
     // the pointer gone, often before the frame that handles the click; without this the click
@@ -197,11 +207,17 @@ pub(crate) fn barrel_tap(app: &mut PhotocraftApp, response: &Response, tool: Too
     // pointer for the rest of this frame so the press can't start a stroke after all.
     if !down && app.barrel_tap == Some(BarrelTap::Held) {
         app.barrel_tap = Some(BarrelTap::Released);
-        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()).or(at) {
+        // Over the canvas (or gone from over it): a tap lifted over a panel opens nothing.
+        if let Some(p) = at {
             crate::brush_picker::open(&mut app.ui, ctx, [p.x, p.y]);
         }
     }
     true
+}
+
+/// Where [`barrel_tap`] keeps the last frame it ran in.
+pub(crate) fn barrel_frame_id() -> egui::Id {
+    egui::Id::new("barrel-tap-frame")
 }
 
 /// A tap with the pen's barrel button held (see [`barrel_tap`]).
@@ -416,6 +432,30 @@ mod tests {
         h.state().stylus.feed.set_barrel(false, true);
         h.run_steps(2);
         assert!(h.state().ui.brush_picker.is_none(), "off the canvas, no picker");
+        // A tap with the button held that lifts over something else opens nothing, paints nothing.
+        h.event(egui::Event::PointerMoved(c));
+        h.run_steps(2);
+        h.state().stylus.feed.set_barrel(true, false);
+        press(&mut h, c, PointerButton::Primary, true);
+        h.event(egui::Event::PointerMoved(egui::pos2(2.0, 2.0)));
+        h.run_steps(1);
+        press(&mut h, egui::pos2(2.0, 2.0), PointerButton::Primary, false);
+        h.state().stylus.feed.set_barrel(false, false);
+        h.run_steps(2);
+        assert!(h.state().ui.brush_picker.is_none(), "lifted off the canvas, no picker");
+        assert_eq!(strokes(&h).len(), 1, "and no stroke");
+        // What the button did while no canvas handled the pen is dropped: no late picker, and the
+        // next ordinary tap paints.
+        h.event(egui::Event::PointerMoved(c));
+        h.run_steps(2);
+        h.state().stylus.feed.set_barrel(true, false);
+        h.state().stylus.feed.set_barrel(false, true);
+        h.ctx.data_mut(|d| d.insert_temp(barrel_frame_id(), 0u64));
+        h.run_steps(2);
+        assert!(h.state().ui.brush_picker.is_none(), "a click from frames the canvas missed is dropped");
+        press(&mut h, c, PointerButton::Primary, true);
+        press(&mut h, c, PointerButton::Primary, false);
+        assert_eq!(strokes(&h).len(), 2, "and the next tap paints");
     }
 
     #[test]
