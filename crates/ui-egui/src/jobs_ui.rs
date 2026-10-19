@@ -14,7 +14,9 @@
 //!   background without locking the document or showing the modal dialog: the worker writes a
 //!   snapshot, painting and editing go on, and the revision that was written is recorded when the
 //!   job ends (later edits stay unsaved). The status bar and tab title show "Saving NN%". Saving
-//!   again while a save to the same file runs queues one follow-up save of the newest state.
+//!   a document again while one of its saves runs (to any file) queues the new save, and queued
+//!   saves start one at a time, so an older save can never finish after a newer one and leave the
+//!   document with the older file's path and revision.
 //!   Automation saves still lock the document, as the control protocol expects.
 //!
 //! The canvas keeps showing the pre-job state: workers never touch the session's documents.
@@ -144,6 +146,9 @@ pub struct SaveJob {
     /// (a user's save leaves the document editable meanwhile).
     pub revision: u64,
     pub path: String,
+    /// The export settings it writes with: a queued save of the same file with other settings
+    /// still runs once this one has made the document clean.
+    pub settings: ExportSettings,
     /// A copy leaves the document's path and unsaved state alone.
     pub copy: bool,
     /// An automation save records without firing user-configured hooks.
@@ -154,7 +159,7 @@ pub struct SaveJob {
     pub ended: bool,
 }
 
-/// A save waiting for the running save to the same file (see [`JobsUi::queued_saves`]).
+/// A save waiting for the running save of its document (see [`JobsUi::queued_saves`]).
 pub(crate) struct QueuedSave {
     doc: DocId,
     path: String,
@@ -180,8 +185,8 @@ pub struct JobsUi {
     pub close_after_saves: bool,
     /// The open tab shown in the canvas area instead of the active document.
     pub focus: Option<JobId>,
-    /// Saves asked for while a save to the same file was still writing: each starts, with the
-    /// document's state at that time, once the running one ends.
+    /// Saves of a document asked for while one of its saves was still writing, oldest first: the
+    /// next one starts, with the document's state at that time, when the running one ends.
     pub(crate) queued_saves: Vec<QueuedSave>,
     /// The job the latest [`run`] started (the control channel waits on it).
     pub(crate) last_started: Option<JobId>,
@@ -285,18 +290,22 @@ pub fn start_save(
     }
     let name = crate::file_open::display_name(&path);
     let (snapshot, doc, revision) = (Arc::clone(&st.doc), st.doc.id, st.revision);
-    // One writer per file: an older snapshot must not land after a newer one. A user's save of
-    // the same document while one is writing waits for it, then saves the state at that time.
-    if let Some(running) = app.jobs.saves.iter().find(|s| s.path == path) {
-        // A cancelled save whose worker is still returning has ended: nothing would start the
-        // queued one, so that case still says to try again.
-        if automation || running.doc != doc || running.ended {
-            return Err(crate::i18n::fmt(tl!("A save to {name} is still running; try again when it finishes"), &[("name", &name)]));
-        }
-        app.jobs.queued_saves.retain(|q| q.path != path);
+    // One save of a document at a time: completions record the path and revision written, so an
+    // older save finishing after a newer one (Save, then Save As elsewhere) would leave the older
+    // state. A user's save waits for the running one, then saves the document as it is then; the
+    // same request queued again replaces the earlier one. (A cancelled save whose worker is still
+    // returning has ended, and nothing would start a save queued behind it.)
+    let running_doc = app.jobs.saves.iter().any(|s| s.doc == doc && !s.ended);
+    if running_doc && !automation {
+        app.jobs.queued_saves.retain(|q| !(q.doc == doc && q.path == path && q.copy == copy));
         app.jobs.queued_saves.push(QueuedSave { doc, path, settings, copy, save });
         return Ok(None);
     }
+    // One writer per file, too: an older snapshot must not land after a newer one.
+    if running_doc || app.jobs.saves.iter().any(|s| s.path == path) {
+        return Err(crate::i18n::fmt(tl!("A save to {name} is still running; try again when it finishes"), &[("name", &name)]));
+    }
+    let written = settings.clone();
     let label = crate::i18n::fmt(tl!("Saving {name}"), &[("name", &name)]);
     let target = path.clone();
     let result_path = path.clone();
@@ -328,7 +337,7 @@ pub fn start_save(
             Ok(Some((path, warnings)))
         }
         Started::Job(job) => {
-            app.jobs.saves.push(SaveJob { job, doc, revision, path, copy, automation, state, ended: false });
+            app.jobs.saves.push(SaveJob { job, doc, revision, path, settings: written, copy, automation, state, ended: false });
             // Control and MCP requests wait on it, as for other jobs.
             app.jobs.last_started = Some(job);
             // The status bar's progress readout names the save; clear any old message.
@@ -360,32 +369,37 @@ fn finish_save(app: &mut PhotocraftApp, ctx: &egui::Context, save: SaveJob, labe
         JobOutcome::Failed(err) => {
             // Don't close the window over the error.
             app.jobs.close_after_saves = false;
-            app.jobs.queued_saves.retain(|q| q.path != save.path);
+            // A save to the file that failed is dropped with it; other queued saves still run.
+            app.jobs.queued_saves.retain(|q| !(q.doc == save.doc && q.path == save.path));
             notices::error(app, crate::i18n::fmt(tl!("Save failed: {error}"), &[("error", &err)]));
         }
         JobOutcome::Cancelled => {
             app.jobs.close_after_saves = false;
-            app.jobs.queued_saves.retain(|q| q.path != save.path);
+            app.jobs.queued_saves.retain(|q| !(q.doc == save.doc && q.path == save.path));
             app.ui.status = crate::i18n::fmt(tl!("Cancelled {label}"), &[("label", label)]);
             app.ui.status_error = false;
         }
     }
-    start_queued_save(app, &save.path);
+    start_queued_save(app, &save);
     close_after_saves(app, ctx);
 }
 
-/// The save to `path` that waited for the one that just ended: start it with the document's
-/// current state, unless that state is already what the file holds.
-fn start_queued_save(app: &mut PhotocraftApp, path: &str) {
-    let Some(i) = app.jobs.queued_saves.iter().position(|q| q.path == path) else { return };
-    let q = app.jobs.queued_saves.remove(i);
-    let current = |app: &PhotocraftApp| app.session.documents().iter().find(|st| st.doc.id == q.doc).is_none_or(|st| !st.is_dirty());
-    if !q.copy && current(app) {
-        return;
-    }
-    let r = app.with_document(q.doc, |app| start_save(app, q.path.clone(), q.settings.clone(), q.copy, q.save.clone(), false));
-    if let Err(e) = r {
-        notices::error(app, crate::i18n::fmt(tl!("Save failed: {error}"), &[("error", &e)]));
+/// The next save of `ended`'s document that waited for it: started with the document's current
+/// state. One that would write exactly what `ended` just wrote (the same file and settings, and
+/// the document unchanged since) is skipped, and the one after it is considered instead.
+fn start_queued_save(app: &mut PhotocraftApp, ended: &SaveJob) {
+    while let Some(i) = app.jobs.queued_saves.iter().position(|q| q.doc == ended.doc) {
+        let q = app.jobs.queued_saves.remove(i);
+        let clean = app.session.documents().iter().find(|st| st.doc.id == q.doc).is_none_or(|st| !st.is_dirty());
+        if !q.copy && !ended.copy && clean && q.path == ended.path && q.settings == ended.settings {
+            continue;
+        }
+        let r = app.with_document(q.doc, |app| start_save(app, q.path.clone(), q.settings.clone(), q.copy, q.save.clone(), false));
+        match r {
+            // It ran inline (no background jobs) or went to the background: either way, done.
+            Ok(_) => return,
+            Err(e) => notices::error(app, crate::i18n::fmt(tl!("Save failed: {error}"), &[("error", &e)])),
+        }
     }
 }
 

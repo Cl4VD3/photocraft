@@ -484,6 +484,44 @@ fn saving_again_while_a_save_runs_queues_one_more_save() {
     assert!(!h.state().session.active().unwrap().is_dirty(), "the edit made during the first save is saved too");
 }
 
+/// Save, then Save As to another file while the first save still writes: the second waits, so
+/// the document ends up with the newer file's path and revision whichever would finish first.
+#[test]
+fn a_second_save_of_a_document_to_another_file_waits_for_the_first() {
+    let mut h = app_harness();
+    let gates = Gates { write: Arc::new(AtomicBool::new(true)), ..Gates::default() };
+    h.state_mut().services.save_file = Some(gates.save(None));
+    let (a, b) = ("/tmp/photocraft-test/first.psd", "/tmp/photocraft-test/second.psd");
+    h.state_mut().save_as(Some(a.into())).unwrap();
+    assert!(h.state_mut().run("layer.new.layer", json!({})).is_ok());
+    h.state_mut().save_as(Some(b.into())).expect("queued, not refused");
+    assert_eq!(h.state().jobs.saves.len(), 1, "one save of a document at a time");
+    gates.encode.store(true, Ordering::Relaxed);
+    step_until(&mut h, |a| !a.saving() && a.jobs.queued_saves.is_empty());
+    assert_eq!(gates.written(), [a, b], "in the order asked");
+    let st = h.state().session.active().unwrap();
+    assert_eq!(st.path.as_deref(), Some(b), "the later Save As is the document's file");
+    assert!(!st.is_dirty(), "and holds the edit made during the first save");
+}
+
+/// A save of the same file with other export settings, asked for while the first save writes,
+/// still runs once the first has made the document clean.
+#[test]
+fn a_queued_save_with_other_settings_still_runs_when_the_document_is_clean() {
+    let mut h = app_harness();
+    let gates = Gates { write: Arc::new(AtomicBool::new(true)), ..Gates::default() };
+    h.state_mut().services.save_file = Some(gates.save(None));
+    let path = "/tmp/photocraft-test/settings.psd";
+    let first = crate::ExportSettings::default();
+    let other = crate::ExportSettings { tiff_layers: !first.tiff_layers, ..first.clone() };
+    h.state_mut().write_document(path.into(), &first, false).unwrap();
+    h.state_mut().write_document(path.into(), &other, false).expect("queued, not refused");
+    h.state_mut().write_document(path.into(), &other, false).expect("the same request again replaces it");
+    gates.encode.store(true, Ordering::Relaxed);
+    step_until(&mut h, |a| !a.saving() && a.jobs.queued_saves.is_empty());
+    assert_eq!(gates.written(), [path, path], "the second save, with the other settings, still ran (once)");
+}
+
 #[test]
 fn a_failed_save_or_one_cancelled_while_encoding_leaves_the_document_unsaved() {
     let mut h = app_harness();
