@@ -316,6 +316,7 @@ fn run_waiting(app: &mut PhotocraftApp, wait: bool, run: impl FnOnce(&mut Photoc
         app.session.edit_prefs(|prefs| prefs.script_events.enabled = false);
     }
     app.jobs.last_started = None;
+    app.jobs.queued_claim = None;
     let result = run(app);
     if events_enabled {
         app.session.edit_prefs(|prefs| prefs.script_events.enabled = true);

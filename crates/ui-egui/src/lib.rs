@@ -1805,7 +1805,12 @@ impl PhotocraftApp {
                     let _ = reply.send(v);
                 }
                 control::Outcome::AfterInput => self.input_waiters.push(reply),
-                control::Outcome::AfterJob(job) => self.jobs.waiters.push((job, reply)),
+                // A save queued behind a running one: the request waits for that save.
+                control::Outcome::AfterJob(job) => {
+                    if let Err(reply) = jobs_ui::claim_queued_save(self, reply) {
+                        self.jobs.waiters.push((job, reply));
+                    }
+                }
                 control::Outcome::Screenshot { token, path } => {
                     // Wait out egui's fade animations (~83 ms) and a few rendered frames first.
                     let settle = ctx.global_style().animation_time as f64 * 2000.0 + 60.0;
