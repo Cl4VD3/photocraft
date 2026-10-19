@@ -128,7 +128,8 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             let ctx = ui.ctx().clone();
             let footer = (if t.pro { 8.0 } else { 14.0 })
                 + chips_height(t.pro, t.round_chips, t.round_chips && double)
-                + if t.pro { 8.0 + if double { bx } else { bx * 2.0 + 3.0 } } else { 0.0 }
+                + 8.0
+                + if double { bx } else { bx * 2.0 + 3.0 }
                 + 6.0;
             // As tall as the tools, so the colour chips sit right under them (Photoshop); a column
             // taller than the window scrolls and keeps the chips at the bottom.
@@ -287,81 +288,79 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             });
                         }
                     }
-                    if t.pro && icons::button(ui, "ellipsis", bx, false, tl!("Edit Toolbar…")).clicked() {
+                    if icons::button(ui, "ellipsis", bx, false, tl!("Edit Toolbar…")).clicked() {
                         let _ = crate::menus::invoke(app, &ctx, "edit.toolbar", json!({}));
                     }
                     reveal_focused_control(ui);
                 });
             ui.add_space(if t.pro { 8.0 } else { 14.0 });
             color_chips(app, ui, double);
-            if t.pro {
-                ui.add_space(8.0);
+            ui.add_space(8.0);
 
-                let layout = if double { egui::Layout::left_to_right(egui::Align::Min) } else { egui::Layout::top_down(egui::Align::Min) };
+            let layout = if double { egui::Layout::left_to_right(egui::Align::Min) } else { egui::Layout::top_down(egui::Align::Min) };
 
-                ui.with_layout(layout, |ui| {
-                    let quick_mask = app.session.active().is_some_and(|s| s.doc.quick_mask.is_some());
-                    if icons::button_with_icon_size_tip(
-                        ui,
-                        "square-dashed",
-                        bx,
-                        (bx * 0.52).round(),
-                        quick_mask,
-                        if quick_mask { tl!("Edit in Standard Mode  (Q)") } else { tl!("Edit in Quick Mask Mode  (Q)") },
-                        tool_tips,
-                    )
-                    .clicked()
-                    {
-                        let _ = crate::menus::invoke(app, &ctx, "select.editInQuickMaskMode", json!({}));
-                    }
-                    let sm = icons::button_with_icon_size_tip(ui, "app-window", bx, (bx * 0.52).round(), false, tl!("Change Screen Mode  (F)"), tool_tips);
-                    paint_toolbar_flyout_indicator(ui, &t, &sm);
+            ui.with_layout(layout, |ui| {
+                let quick_mask = app.session.active().is_some_and(|s| s.doc.quick_mask.is_some());
+                if icons::button_with_icon_size_tip(
+                    ui,
+                    "square-dashed",
+                    bx,
+                    (bx * 0.52).round(),
+                    quick_mask,
+                    if quick_mask { tl!("Edit in Standard Mode  (Q)") } else { tl!("Edit in Quick Mask Mode  (Q)") },
+                    tool_tips,
+                )
+                .clicked()
+                {
+                    let _ = crate::menus::invoke(app, &ctx, "select.editInQuickMaskMode", json!({}));
+                }
+                let sm = icons::button_with_icon_size_tip(ui, "app-window", bx, (bx * 0.52).round(), false, tl!("Change Screen Mode  (F)"), tool_tips);
+                paint_toolbar_flyout_indicator(ui, &t, &sm);
 
-                    // Right-click, or click and hold like the tool flyouts (#4444), lists the modes,
-                    // like Photoshop's flyout. The release that ends a hold doesn't cycle the mode.
-                    let held_id = sm.id.with("held");
-                    let was_held = ui.data(|d| d.get_temp::<bool>(held_id)).unwrap_or(false);
-                    let held_for = sm.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|t0| i.time - t0))).flatten();
-                    if let Some(seconds) = held_for
-                        && seconds < 0.35
-                    {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.35 - seconds));
-                    }
-                    let long_press = !was_held && held_for.is_some_and(|seconds| seconds >= 0.35);
-                    if long_press {
-                        ui.data_mut(|d| d.insert_temp(held_id, true));
-                    } else if was_held && !sm.is_pointer_button_down_on() {
-                        ui.data_mut(|d| d.remove::<bool>(held_id));
-                    }
-                    let cycle = sm.clicked() && !was_held;
-                    if cycle {
-                        let _ = crate::menus::invoke(app, &ctx, "view.screenMode.cycle", json!({}));
-                    }
-                    let open = if sm.secondary_clicked() || long_press {
-                        Some(egui::SetOpenCommand::Bool(true))
-                    } else if cycle {
-                        Some(egui::SetOpenCommand::Bool(false))
-                    } else {
-                        None
-                    };
-                    // The release ending the hold counts as a click; it mustn't close the list it opened.
-                    let close = if was_held || long_press { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClick };
-                    egui::Popup::menu(&sm).open_memory(open).close_behavior(close).at_pointer_fixed().show(|ui| {
-                        ui.set_min_width(220.0);
-                        for (id, label) in [
-                            ("view.screenMode.standard", tl!("Standard Screen Mode")),
-                            ("view.screenMode.fullScreenWithMenuBar", tl!("Full Screen Mode With Menu Bar")),
-                            ("view.screenMode.fullScreen", tl!("Full Screen Mode")),
-                        ] {
-                            let on = crate::view_cmds::checked(app, id).unwrap_or(false);
-                            if ui.add(egui::Button::selectable(on, label)).clicked() {
-                                let _ = crate::menus::invoke(app, &ctx, id, json!({}));
-                                ui.close();
-                            }
+                // Right-click, or click and hold like the tool flyouts (#4444), lists the modes,
+                // like Photoshop's flyout. The release that ends a hold doesn't cycle the mode.
+                let held_id = sm.id.with("held");
+                let was_held = ui.data(|d| d.get_temp::<bool>(held_id)).unwrap_or(false);
+                let held_for = sm.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|t0| i.time - t0))).flatten();
+                if let Some(seconds) = held_for
+                    && seconds < 0.35
+                {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.35 - seconds));
+                }
+                let long_press = !was_held && held_for.is_some_and(|seconds| seconds >= 0.35);
+                if long_press {
+                    ui.data_mut(|d| d.insert_temp(held_id, true));
+                } else if was_held && !sm.is_pointer_button_down_on() {
+                    ui.data_mut(|d| d.remove::<bool>(held_id));
+                }
+                let cycle = sm.clicked() && !was_held;
+                if cycle {
+                    let _ = crate::menus::invoke(app, &ctx, "view.screenMode.cycle", json!({}));
+                }
+                let open = if sm.secondary_clicked() || long_press {
+                    Some(egui::SetOpenCommand::Bool(true))
+                } else if cycle {
+                    Some(egui::SetOpenCommand::Bool(false))
+                } else {
+                    None
+                };
+                // The release ending the hold counts as a click; it mustn't close the list it opened.
+                let close = if was_held || long_press { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClick };
+                egui::Popup::menu(&sm).open_memory(open).close_behavior(close).at_pointer_fixed().show(|ui| {
+                    ui.set_min_width(220.0);
+                    for (id, label) in [
+                        ("view.screenMode.standard", tl!("Standard Screen Mode")),
+                        ("view.screenMode.fullScreenWithMenuBar", tl!("Full Screen Mode With Menu Bar")),
+                        ("view.screenMode.fullScreen", tl!("Full Screen Mode")),
+                    ] {
+                        let on = crate::view_cmds::checked(app, id).unwrap_or(false);
+                        if ui.add(egui::Button::selectable(on, label)).clicked() {
+                            let _ = crate::menus::invoke(app, &ctx, id, json!({}));
+                            ui.close();
                         }
-                    });
+                    }
                 });
-            }
+            });
         });
 }
 
@@ -602,7 +601,14 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            let title = app.session.active().map(|d| format!("{}{}", d.doc.name, if d.is_dirty() { "  •" } else { "" })).unwrap_or_else(|| "PhotoCraft".into());
+            // Preferences › Interface › Show File Name In Title: with it off the bar keeps the
+            // app name and the unsaved dot, since the tabs already name the file (#5037).
+            let show_name = app.session.prefs().interface.show_file_name_in_title;
+            let title = app
+                .session
+                .active()
+                .map(|d| format!("{}{}", if show_name { d.doc.name.as_str() } else { "PhotoCraft" }, if d.is_dirty() { "  •" } else { "" }))
+                .unwrap_or_else(|| "PhotoCraft".into());
             // The menus and the far-end controls are laid out first; the title is centred in
             // whatever room is left between them (`free`, left to right: menus then controls, or
             // controls then menus in a right-to-left UI), shortened or dropped rather than drawn
@@ -728,8 +734,12 @@ pub fn system_title_bar(app: &PhotocraftApp) -> bool {
 
 /// The OS window title: the active document's name suffixed with the app name (a `*` prefix
 /// marks unsaved changes, like the `•` in the app-drawn title), or just the app name with no
-/// document open.
+/// document open. With Preferences › Interface › Show File Name In Title off, the file name
+/// drops out and only the app name (and the `*`) remains (#5037).
 pub fn window_title(app: &PhotocraftApp) -> String {
+    if !app.session.prefs().interface.show_file_name_in_title {
+        return format!("{}PhotoCraft", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" });
+    }
     app.session.active().map(|d| format!("{}{} \u{2014} PhotoCraft", if d.is_dirty() { "*" } else { "" }, d.doc.name)).unwrap_or_else(|| "PhotoCraft".into())
 }
 
@@ -818,6 +828,40 @@ mod title_tests {
             st.revision += 1;
         }
         assert_eq!(window_title(&app), "*foo.psd \u{2014} PhotoCraft");
+    }
+
+    #[test]
+    fn hiding_the_file_name_keeps_the_app_name_and_the_dirty_mark() {
+        let mut app = app(true);
+        open_named(&mut app, "foo.psd");
+        app.session.prefs.edit(|p| p.interface.show_file_name_in_title = false);
+        assert_eq!(window_title(&app), "PhotoCraft");
+        if let Some(st) = app.session.active_mut() {
+            st.revision += 1;
+        }
+        assert_eq!(window_title(&app), "*PhotoCraft");
+    }
+
+    #[test]
+    fn hidden_file_name_leaves_the_app_name_in_the_drawn_title() {
+        let mut app = app(true);
+        open_named(&mut app, "foo.psd");
+        let texts = |app: &mut crate::PhotocraftApp| {
+            let ctx = egui::Context::default();
+            crate::PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| super::title_bar(app, ui));
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            for shape in &out.shapes {
+                collect_text(&shape.shape, &mut texts);
+            }
+            texts
+        };
+        assert!(texts(&mut app).iter().any(|t| t.contains("foo.psd")), "shown by default");
+        app.session.prefs.edit(|p| p.interface.show_file_name_in_title = false);
+        let hidden = texts(&mut app);
+        assert!(!hidden.iter().any(|t| t.contains("foo.psd")), "file name hidden: {hidden:?}");
+        assert!(hidden.iter().any(|t| t.contains("PhotoCraft")), "app name kept: {hidden:?}");
     }
 
     #[test]
@@ -1196,7 +1240,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         widgets::value_field(ui, &mut app.ui.tool_options.tolerance, 0.0..=255.0, "", 58.0);
                         widgets::checkbox(ui, &mut app.ui.tool_options.anti_alias, tl!("Anti-alias"));
                         widgets::checkbox(ui, &mut app.ui.tool_options.contiguous, tl!("Contiguous"));
-                        widgets::checkbox(ui, &mut app.ui.tool_options.sample_all_layers, tl!("Sample All Layers"));
+                        widgets::checkbox(ui, &mut app.ui.tool_options.sample_all.magic_wand, tl!("Sample All Layers"));
                         widgets::vline(ui, 22.0);
                         if widgets::secondary_button(ui, tl!("Select Subject"), 0.0).clicked() {
                             let r = app.run("select.subject", json!({}));
@@ -1218,7 +1262,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         widgets::value_field(ui, &mut app.ui.tool_options.tolerance, 0.0..=255.0, "", 58.0);
                         widgets::checkbox(ui, &mut app.ui.tool_options.anti_alias, tl!("Anti-alias"));
                         widgets::checkbox(ui, &mut app.ui.tool_options.contiguous, tl!("Contiguous"));
-                        widgets::checkbox(ui, &mut app.ui.tool_options.sample_all_layers, tl!("All Layers"));
+                        widgets::checkbox(ui, &mut app.ui.tool_options.sample_all.paint_bucket, tl!("All Layers"));
                     }
                     Tool::Gradient => {
                         // Live "Gradient" (a Gradient Fill layer) or "Classic gradient" (pixels).
@@ -3099,7 +3143,9 @@ fn layer_row(
         if let Some(kind) = masks.hit(p) {
             return Some(crate::mask_thumbs_ui::load_params(l, kind, m));
         }
-        thumb.expand(2.0).contains(p).then(|| json!({"channel": "transparency", "layer": l.id.0, "operation": crate::channels_panel::load_operation(m)}))
+        // The Background has no transparency to load: Photoshop treats the click as a plain one.
+        (!doc.is_background(l.id) && thumb.expand(2.0).contains(p))
+            .then(|| json!({"channel": "transparency", "layer": l.id.0, "operation": crate::channels_panel::load_operation(m)}))
     });
     // ⇧-click a mask thumbnail: disable / enable that mask; ⌥-click a layer mask: view it.
     let mask_toggle = resp.clicked().then(|| (ui.input(|i| i.modifiers), resp.interact_pointer_pos())).and_then(|(m, pos)| {
@@ -3111,14 +3157,17 @@ fn layer_row(
     } else if let Some(cmd) = mask_toggle {
         actions.push(cmd);
     } else if resp.clicked() && !eye_resp.clicked() && !toggled && !fx_toggled && !masks.clicked {
-        let mode = select_mode(ui.input(|i| i.modifiers));
+        let m = ui.input(|i| i.modifiers);
+        let pos = resp.interact_pointer_pos();
+        let on_thumb = pos.is_some_and(|p| thumb.expand(2.0).contains(p));
+        // ⌘-click on the Background thumbnail stands in for the plain click (there is no
+        // transparency to load): it selects the Background alone, not toggled into the set.
+        let mode = if m.command && on_thumb && doc.is_background(l.id) { "replace" } else { select_mode(m) };
         actions.push(("layer.select".into(), json!({"layer": l.id.0, "mode": mode})));
         crate::smart_ui::deselect(ctx, doc.id);
         // A thumbnail explicitly selects content or a mask. Selecting an adjustment/fill row
         // defaults to its mask, but clicking its content thumbnail must leave the mask target.
-        let pos = resp.interact_pointer_pos();
         let on_mask = mask_rect.zip(pos).is_some_and(|(r, p)| r.expand(2.0).contains(p));
-        let on_thumb = pos.is_some_and(|p| thumb.expand(2.0).contains(p));
         let on_vector = pos.and_then(|p| masks.hit(p)) == Some(crate::mask_thumbs_ui::MaskKind::Vector);
         // Clicking the layer thumbnail leaves mask view (#196).
         let viewing = app.session.active().and_then(photocraft_engine::mask_view_cmds::current).is_some_and(|v| v.layer == l.id);
@@ -3141,7 +3190,6 @@ fn layer_row(
             actions.push(("ui.maskTarget".into(), json!(false)));
         }
         // ⌥-click the layer thumbnail: fit the layer on screen, as Photoshop does.
-        let m = ui.input(|i| i.modifiers);
         if on_thumb && m.alt && !m.shift && !m.command {
             actions.push(("view.fitLayersOnScreen".into(), Value::Null));
         }
@@ -5761,6 +5809,27 @@ mod toolbar_tests {
         }
     }
 
+    /// #4653: every theme draws Edit Toolbar, Quick Mask and Screen Mode, not only Pro.
+    #[test]
+    fn every_theme_has_the_toolbar_controls() {
+        for kind in crate::theme::ThemeKind::ALL {
+            let app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(800.0, 1400.0)).build_ui_state(
+                |ui, app: &mut PhotocraftApp| {
+                    if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                        toolbar(app, ui);
+                    }
+                },
+                app,
+            );
+            PhotocraftApp::setup_context(&h.ctx, kind);
+            h.run_steps(2);
+            for label in ["Edit Toolbar…", "Edit in Quick Mask Mode  (Q)", "Change Screen Mode  (F)"] {
+                assert!(h.query_by_label(label).is_some(), "{kind:?}: no {label:?} button");
+            }
+        }
+    }
+
     fn click(h: &mut egui_kittest::Harness<'_, PhotocraftApp>, p: egui::Pos2) {
         h.hover_at(p);
         h.run_steps(1);
@@ -6131,6 +6200,10 @@ mod compact_visual_regressions {
                     phase: egui::TouchPhase::Move,
                 });
                 harness.run_steps(30);
+                // Off the toolbar, so a tooltip of the tool scrolled under the pointer isn't a
+                // second "Zoom Tool" node.
+                harness.event(egui::Event::PointerMoved(pos2(300.0, 100.0)));
+                harness.run_steps(2);
                 let node = harness.get_by_label("Zoom Tool  (Z)");
                 let rect = node.rect();
                 assert!(rect.top() >= 0.0 && rect.bottom() <= 360.0, "{kind:?} at {scale}x: last tool remains outside the toolbar: {rect:?}");
@@ -6168,13 +6241,13 @@ mod compact_visual_regressions {
         }
     }
 
-    /// A window taller than the tools keeps the colour chips right under the last tool, as
-    /// Photoshop does, instead of at the bottom of the toolbar.
+    /// A window taller than the tools keeps the colour chips right under the tool column (its
+    /// last row is Edit Toolbar), as Photoshop does, instead of at the bottom of the toolbar.
     #[test]
     fn tall_toolbar_keeps_the_colour_chips_under_the_tools() {
         for kind in theme::ThemeKind::ALL {
             let harness = toolbar_harness_sized(kind, 1.0, 1600.0);
-            let last = harness.get_by_label("Zoom Tool  (Z)").rect();
+            let last = harness.get_by_label("Edit Toolbar…").rect();
             let swap = harness.get_by_label("Swap colours (X)").rect();
             assert!(swap.top() - last.bottom() < 80.0, "{kind:?}: the chips {swap:?} sit far below the last tool {last:?}");
         }
