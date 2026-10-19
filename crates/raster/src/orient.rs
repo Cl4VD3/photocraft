@@ -60,7 +60,11 @@ impl Surface {
         let bpp = self.format.bytes_per_pixel();
         let ts = TILE_SIZE as usize;
         let dp: &[u8] = &self.default_pixel;
-        let targets: Vec<TileCoord> = self.tiles.keys().flat_map(|c| o.map_rect(w, h, c.rect()).tiles()).collect::<BTreeSet<_>>().into_iter().collect();
+        // Only source tiles with content make target tiles: a large area written with the default
+        // pixel (a cleared layer) can leave many allocated blank tiles, which would each cost a
+        // target tile's allocation and scan for nothing. Gaps read as the default pixel anyway.
+        let sources: Vec<TileCoord> = self.tiles.par_iter().filter(|(_, t)| t.data.chunks_exact(bpp).any(|px| px != dp)).map(|(c, _)| *c).collect();
+        let targets: Vec<TileCoord> = sources.iter().flat_map(|c| o.map_rect(w, h, c.rect()).tiles()).collect::<BTreeSet<_>>().into_iter().collect();
         let tiles: Vec<(TileCoord, Arc<Tile>)> = targets
             .par_iter()
             .filter_map(|&dc| {
@@ -179,5 +183,13 @@ mod tests {
         // A tile allocated but holding only the default pixel is not carried over.
         let _ = s.tile_mut(TileCoord::new(0, 0));
         assert_eq!(s.oriented(Orient::Cw90, 100, 100).tile_count(), 0);
+        // Among many blank tiles, only the one with content makes a target tile.
+        for tx in 1..40 {
+            let _ = s.tile_mut(TileCoord::new(tx, 3));
+        }
+        s.write_pixel(5, 5, &[1.0, 0.0, 0.0, 1.0]);
+        let flipped = s.oriented(Orient::FlipHorizontal, 100, 100);
+        assert_eq!(flipped.tile_count(), 1);
+        assert_eq!(flipped.pixel(94, 5), vec![1.0, 0.0, 0.0, 1.0]);
     }
 }
